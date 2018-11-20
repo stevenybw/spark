@@ -6,7 +6,11 @@
  * Author: Bowen Yu <stevenybw@hotmail.com>
  */
 
-package org.apache.spark.shuffle.sort.stream;
+/*
+ * Author: Bowen Yu <stevenybw@hotmail.com>
+ */
+
+package org.apache.spark.shuffle.stream;
 
 /**
  * Data distribution used by radix sort to determine writing position for each chunk / partition

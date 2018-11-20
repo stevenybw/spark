@@ -2,7 +2,11 @@
  * Author: Bowen Yu <stevenybw@hotmail.com>
  */
 
-package org.apache.spark.shuffle.sort.stream;
+/*
+ * Author: Bowen Yu <stevenybw@hotmail.com>
+ */
+
+package org.apache.spark.shuffle.stream;
 
 public class DataContents {
   private DatasetDistribution batchDistribution;

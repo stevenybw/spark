@@ -28,14 +28,18 @@ with Logging {
   private lazy val blockManager = Option(_blockManager).getOrElse(SparkEnv.get.blockManager)
   private val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle");
 
+  def getDataFile(shuffleId: Int, reducerId: Int) = {
+    blockManager.diskBlockManager.getFile(ShuffleBlockId(shuffleId, StreamShuffleBlockResolver.NOOP_MAP_ID, reducerId))
+  }
+
   override def getBlockData(blockId: ShuffleBlockId): ManagedBuffer = {
     val shuffleId = blockId.shuffleId
     val mapId = blockId.mapId
-    val reduceId = blockId.reduceId
+    val reducerId = blockId.reduceId
     if (mapId != StreamShuffleBlockResolver.NOOP_MAP_ID) {
-      throw new Exception(s"In stream shuffle mode, mapId must be 0 and there is only one mapper");
+      throw new Exception(s"In stream shuffle mode, mapId must be 0 and there is only one mapper")
     }
-    val dataFile = blockManager.diskBlockManager.getFile(ShuffleDataBlockId(shuffleId, StreamShuffleBlockResolver.NOOP_MAP_ID, reduceId))
+    val dataFile = getDataFile(shuffleId, reducerId)
     new FileSegmentManagedBuffer(
       transportConf,
       dataFile,

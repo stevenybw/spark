@@ -5,6 +5,7 @@
 package org.apache.spark.shuffle.stream
 
 import java.io.BufferedOutputStream
+import java.util.concurrent.ConcurrentHashMap
 
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.internal.Logging
@@ -28,6 +29,9 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   */
 private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {
 
+  val fileBufferBytes = conf.getInt("spark.shuffle.stream.file_buffer_size", 1024*1024)
+  private[this] val activeStreamShuffleHandles = new ConcurrentHashMap[Int, StreamShuffleHandle]()
+
   /**
     * Return a resolver capable of retrieving shuffle block data based on block coordinates.
     */
@@ -39,10 +43,18 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
   override def registerShuffle[K, V, C](shuffleId: Int,
                                         numMaps: Int,
                                         dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
+    val numPartitions = dependency.partitioner.numPartitions
+    logInfo(s"Shuffle registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
     // Streaming shuffle must support serialized shuffle
     assert(SortShuffleManager.canUseSerializedShuffle(dependency))
-    new StreamShuffleHandle[K, V](
-      shuffleId, numMaps, dependency.asInstanceOf[ShuffleDependency[K, V, V]])
+    val streamShuffleHandle = new StreamShuffleHandle[K, V](
+      shuffleId,
+      numMaps,
+      dependency.asInstanceOf[ShuffleDependency[K, V, V]],
+      numPartitions,
+      shuffleBlockResolver.asInstanceOf[StreamShuffleBlockResolver],
+      fileBufferBytes)
+    streamShuffleHandle
   }
 
   /** Get a writer for a given partition. Called on executors by map tasks. */
@@ -86,18 +98,5 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
   /** Shut down this ShuffleManager. */
   override def stop(): Unit = {
     shuffleBlockResolver.stop()
-  }
-}
-
-/**
-  * Subclass of [[BaseShuffleHandle]], used to identify when we've chosen to use the
-  * stream shuffle.
-  */
-class StreamShuffleHandle[K, V](
-                                 shuffleId: Int,
-                                 numMaps: Int,
-                                 dependency: ShuffleDependency[K, V, V])
-  extends BaseShuffleHandle(shuffleId, numMaps, dependency) {
-  def getBufferedOutputStreams(): Array[BufferedOutputStream] = {
   }
 }

@@ -30,7 +30,7 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
 private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {
 
   val fileBufferBytes = conf.getInt("spark.shuffle.stream.file_buffer_size", 1024*1024)
-  private[this] val activeStreamShuffleHandles = new ConcurrentHashMap[Int, StreamShuffleHandle]()
+  private[this] val activeBufferedConsumer = new ConcurrentHashMap[Int, BufferedConsumer]()
 
   /**
     * Return a resolver capable of retrieving shuffle block data based on block coordinates.
@@ -54,6 +54,7 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
       numPartitions,
       shuffleBlockResolver.asInstanceOf[StreamShuffleBlockResolver],
       fileBufferBytes)
+    activeBufferedConsumer.putIfAbsent(shuffleId, streamShuffleHandle)
     streamShuffleHandle
   }
 
@@ -92,6 +93,10 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
     * @return true if the metadata removed successfully, otherwise false.
     */
   override def unregisterShuffle(shuffleId: Int): Boolean = {
+    val bufferedConsumer = activeBufferedConsumer.get(shuffleId)
+    if (bufferedConsumer != null) {
+      bufferedConsumer.close()
+    }
     true
   }
 

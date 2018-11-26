@@ -15,8 +15,13 @@ import org.apache.spark.storage.{BlockManager, ShuffleBlockId, ShuffleDataBlockI
 
 
 /**
-  * Create and maintain the shuffle block's mapping between logic block and physical file location.
-  * Data of shuffle blocks to the same reduce task are stored in a single consolidated data file.
+  * Comapring to [[org.apache.spark.shuffle.IndexShuffleBlockResolver]], StreamShuffleBlockResolver will not merge
+  * the output partitions into a single map output file. The message from each mapper to each reducer is a single
+  * file.
+  *
+  * This design seems to produce too many files (M*R files). But this enables Column Shuffle Format and we can
+  * significantly reduce the number of files to E*R (E: Number of Executors) by executor-side merging.
+  *
   * @param conf
   * @param _blockManager
   */
@@ -26,20 +31,29 @@ private[spark] class StreamShuffleBlockResolver(
 extends ShuffleBlockResolver
 with Logging {
   private lazy val blockManager = Option(_blockManager).getOrElse(SparkEnv.get.blockManager)
-  private val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle");
+  private val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle")
+
+  def getDataBlock(shuffleId: Int, reducerId: Int) = {
+    ShuffleBlockId(shuffleId, StreamShuffleBlockResolver.NOOP_MAP_ID, reducerId)
+  }
 
   def getDataFile(shuffleId: Int, reducerId: Int) = {
-    blockManager.diskBlockManager.getFile(ShuffleBlockId(shuffleId, StreamShuffleBlockResolver.NOOP_MAP_ID, reducerId))
+    blockManager.diskBlockManager.getFile(getDataBlock(shuffleId, reducerId))
+  }
+
+  def getDataBlock(shuffleId: Int, mapperId: Int, reducerId: Int) = {
+    ShuffleBlockId(shuffleId, mapperId, reducerId)
+  }
+
+  def getDataFile(shuffleId: Int, mapperId: Int, reducerId: Int) = {
+    blockManager.diskBlockManager.getFile(getDataBlock(shuffleId, mapperId, reducerId))
   }
 
   override def getBlockData(blockId: ShuffleBlockId): ManagedBuffer = {
     val shuffleId = blockId.shuffleId
     val mapId = blockId.mapId
     val reducerId = blockId.reduceId
-    if (mapId != StreamShuffleBlockResolver.NOOP_MAP_ID) {
-      throw new Exception(s"In stream shuffle mode, mapId must be 0 and there is only one mapper")
-    }
-    val dataFile = getDataFile(shuffleId, reducerId)
+    val dataFile = getDataFile(shuffleId, mapId, reducerId)
     new FileSegmentManagedBuffer(
       transportConf,
       dataFile,

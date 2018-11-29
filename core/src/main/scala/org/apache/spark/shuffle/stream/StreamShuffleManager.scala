@@ -25,6 +25,16 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   *
   *   - High I/O efficiency: solves the problem coming from large amount of reducers
   *
+  * There are several challenge to implement such technique:
+  *
+  *   - Shuffle file format (CSF). Spark's default shuffler SortShuffler assumes that each shuffle task generates
+  *   exactly one index file and one data file, which is implemented in IndexShuffleBlockResolver. However,
+  *   streaming shuffler requires that a single shuffle task is allowed to generate multiple files (one file
+  *   per reducer partition). We provide [[StreamShuffleBlockResolver]] to adapt to this format.
+  *     As a proof-of-concept to demonstrates that we can implement CSF in Spark, we
+  *   implement [[StreamShuffleWriterWithoutMerging]]. This is the same as BypassMergeSortShuffle, except that we
+  *   do not try to merge the output files into one map output file.
+  *
   * @param conf
   */
 private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {

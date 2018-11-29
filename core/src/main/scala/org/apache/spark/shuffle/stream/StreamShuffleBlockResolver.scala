@@ -15,12 +15,8 @@ import org.apache.spark.storage.{BlockManager, ShuffleBlockId, ShuffleDataBlockI
 
 
 /**
-  * Comapring to [[org.apache.spark.shuffle.IndexShuffleBlockResolver]], StreamShuffleBlockResolver will not merge
-  * the output partitions into a single map output file. The message from each mapper to each reducer is a single
-  * file.
-  *
-  * This design seems to produce too many files (M*R files). But this enables Column Shuffle Format and we can
-  * significantly reduce the number of files to E*R (E: Number of Executors) by executor-side merging.
+  * Comapring to [[org.apache.spark.shuffle.IndexShuffleBlockResolver]], StreamShuffleBlockResolver employs a different
+  * format. Each file corresponds to exactly one reducer partition.
   *
   * @param conf
   * @param _blockManager
@@ -54,6 +50,7 @@ with Logging {
     val mapId = blockId.mapId
     val reducerId = blockId.reduceId
     val dataFile = getDataFile(shuffleId, mapId, reducerId)
+    logInfo(s"getBlockData (shuffleId = ${shuffleId}  mapId = ${mapId}  reducerId = ${reducerId}  fileSize = ${dataFile.length()}")
     new FileSegmentManagedBuffer(
       transportConf,
       dataFile,

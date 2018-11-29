@@ -21,7 +21,6 @@ import org.slf4j.LoggerFactory;
 import scala.None$;
 import scala.Option;
 import scala.Product2;
-import scala.Tuple2;
 import scala.collection.Iterator;
 import scala.reflect.ClassTag;
 import scala.reflect.ClassTag$;
@@ -45,11 +44,13 @@ public class StreamShuffleWriterWithoutMerging<K, V> extends ShuffleWriter<K, V>
   private SerializerInstance serializerInstance;
   private Partitioner partitioner;
   private int numPartitions;
+  private File[] mapOutputFiles;
   private FileOutputStream[] fileOutputStreams;
   private BufferedOutputStream[] bufferedOutputStreams;
   private OutputStream[] compressedOutputStreams;
   private SerializationStream[] serializationStreams;
   private MapStatus mapStatus = null;
+  private int mapId;
 
   StreamShuffleWriterWithoutMerging(
           BlockManager blockManager,
@@ -60,14 +61,16 @@ public class StreamShuffleWriterWithoutMerging<K, V> extends ShuffleWriter<K, V>
           SparkConf conf) throws IOException {
     // Use getSizeAsKb (not bytes) to maintain backwards compatibility if no units are provided
     ShuffleDependency<K, V, V> dep = handle.dependency();
-    this.fileBufferBytes = conf.getInt("spark.shuffle.stream.file_buffer_size", 1024*1024);
+    this.fileBufferBytes = (int) conf.getSizeAsKb("spark.shuffle.file.buffer", "32k") * 1024;
     this.blockManager = blockManager;
     this.serializerManager = blockManager.serializerManager();
     this.serializerInstance = dep.serializer().newInstance();
     this.partitioner = dep.partitioner();
     this.numPartitions = partitioner.numPartitions();
+    this.mapOutputFiles = new File[numPartitions];
     this.fileOutputStreams = new FileOutputStream[numPartitions];
     this.bufferedOutputStreams = new BufferedOutputStream[numPartitions];
+    this.compressedOutputStreams = new OutputStream[numPartitions];
     this.serializationStreams = new SerializationStream[numPartitions];
     for(int i=0; i<numPartitions; i++) {
       ShuffleBlockId blockId = streamShuffleBlockResolver.getDataBlock(dep.shuffleId(), mapId, i);
@@ -76,33 +79,44 @@ public class StreamShuffleWriterWithoutMerging<K, V> extends ShuffleWriter<K, V>
       BufferedOutputStream bos = new BufferedOutputStream(fos, fileBufferBytes);
       OutputStream cos = serializerManager.wrapStream(blockId, bos);
       SerializationStream ss = serializerInstance.serializeStream(cos);
+      mapOutputFiles[i] = file;
       fileOutputStreams[i] = fos;
       bufferedOutputStreams[i] = bos;
       compressedOutputStreams[i] = cos;
       serializationStreams[i] = ss;
     }
+    this.mapId = mapId;
   }
 
   @Override
   public void write(Iterator<Product2<K, V>> records) throws IOException {
+    long numRecords = 0;
     long[] partitionLengths = new long[numPartitions];
     while (records.hasNext()) {
       final Product2<K, V> record = records.next();
       final int pid = partitioner.getPartition(record._1());
       serializationStreams[pid].writeKey(record._1(), keyClassTag);
       serializationStreams[pid].writeValue(record._2(), valueClassTag);
+      numRecords++;
     }
     for(int i=0; i<numPartitions; i++) {
       serializationStreams[i].flush();
       compressedOutputStreams[i].flush();
       bufferedOutputStreams[i].flush();
       fileOutputStreams[i].flush();
-      partitionLengths[i] = fileOutputStreams[i].getChannel().size();
       serializationStreams[i].close();
       compressedOutputStreams[i].close();
       bufferedOutputStreams[i].close();
       fileOutputStreams[i].close();
+      assert(mapOutputFiles[i].exists());
+      partitionLengths[i] = mapOutputFiles[i].length();
     }
+    StringBuilder sb = new StringBuilder();
+    for(int i=0; i<numPartitions; i++) {
+      sb.append(partitionLengths[i]);
+      sb.append(" ");
+    }
+    logger.info("Map " + mapId + "   NumRecords " + numRecords + "  OutputFilePath " + mapOutputFiles[0].getAbsolutePath() + " partition distribution " +  sb.toString());
     mapStatus = MapStatus$.MODULE$.apply(blockManager.shuffleServerId(), partitionLengths);
   }
 

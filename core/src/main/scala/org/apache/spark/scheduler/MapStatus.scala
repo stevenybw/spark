@@ -48,6 +48,9 @@ private[spark] sealed trait MapStatus {
 
 
 private[spark] object MapStatus {
+  def apply(loc: BlockManagerId): MapStatus = {
+    new EmptyMapStatus(loc)
+  }
 
   def apply(loc: BlockManagerId, uncompressedSizes: Array[Long]): MapStatus = {
     if (uncompressedSizes.length > 2000) {
@@ -122,6 +125,28 @@ private[spark] class CompressedMapStatus(
     val len = in.readInt()
     compressedSizes = new Array[Byte](len)
     in.readFully(compressedSizes)
+  }
+}
+
+/**
+  * A [[MapStatus]] implementation that does not have any content and the size for each block is zero. It
+  * represent an output of a map task that has been merged.
+  */
+private[spark] class EmptyMapStatus(private[this] var loc: BlockManagerId)
+  extends MapStatus with Externalizable {
+
+  protected def this() = this(null) // For deserialization only
+
+  override def location: BlockManagerId = loc
+
+  override def getSizeForBlock(reduceId: Int): Long = 0
+
+  override def writeExternal(out: ObjectOutput): Unit = Utils.tryOrIOException {
+    loc.writeExternal(out)
+  }
+
+  override def readExternal(in: ObjectInput): Unit = Utils.tryOrIOException {
+    loc = BlockManagerId(in)
   }
 }
 

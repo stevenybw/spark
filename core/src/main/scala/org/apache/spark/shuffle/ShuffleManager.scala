@@ -50,6 +50,11 @@ private[spark] trait ShuffleManager {
       endPartition: Int,
       context: TaskContext): ShuffleReader[K, C]
 
+  /** Get the optionally flusher
+    * The shuffler should provide a ShuffleFlusher if intend to use task merging
+    */
+  def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher]
+
   /**
    * Remove a shuffle's metadata from the ShuffleManager.
    * @return true if the metadata removed successfully, otherwise false.

@@ -71,7 +71,7 @@ public class StreamShuffleWriter<K, V> extends ShuffleWriter<K, V> {
 
   @Override
   public Option<MapStatus> stop(boolean success) {
-    MapStatus mapStatus = MapStatus$.MODULE$.apply(blockManager.shuffleServerId(), null);
+    MapStatus mapStatus = MapStatus$.MODULE$.apply(blockManager.shuffleServerId());
     return Option.apply(mapStatus);
   }
 

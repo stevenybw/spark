@@ -129,6 +129,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
     val env = SparkEnv.get
     handle match {
       case unsafeShuffleHandle: SerializedShuffleHandle[K @unchecked, V @unchecked] =>
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${unsafeShuffleHandle.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
         new UnsafeShuffleWriter(
           env.blockManager,
           shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver],
@@ -138,6 +139,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
           context,
           env.conf)
       case bypassMergeSortHandle: BypassMergeSortShuffleHandle[K @unchecked, V @unchecked] =>
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${bypassMergeSortHandle.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
         new BypassMergeSortShuffleWriter(
           env.blockManager,
           shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver],
@@ -146,6 +148,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
           context,
           env.conf)
       case other: BaseShuffleHandle[K @unchecked, V @unchecked, _] =>
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${other.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
         new SortShuffleWriter(shuffleBlockResolver, other, mapId, context)
     }
   }
@@ -164,6 +167,9 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
   override def stop(): Unit = {
     shuffleBlockResolver.stop()
   }
+
+  /** Get a flusher */
+  override def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher] = None
 }
 
 

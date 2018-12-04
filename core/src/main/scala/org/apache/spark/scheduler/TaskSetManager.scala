@@ -24,13 +24,14 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.math.max
 import scala.util.control.NonFatal
-
 import org.apache.spark._
 import org.apache.spark.TaskState.TaskState
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
+
+import scala.collection.mutable
 
 /**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
@@ -121,6 +122,9 @@ private[spark] class TaskSetManager(
   // state in order to continue to track and account for the running tasks.
   // TODO: We should kill any running task attempts when the task set manager becomes a zombie.
   private[scheduler] var isZombie = false
+
+  // True once this is a merged shuffle and all the ShuffleMapTasks has been completed
+  private[scheduler] var isDraining = false
 
   // Set of pending tasks for each executor. These collections are actually
   // treated as stacks, in which new tasks are added to the end of the
@@ -424,6 +428,7 @@ private[spark] class TaskSetManager(
       case (taskIndex, allowedLocality) => (taskIndex, allowedLocality, true)}
   }
 
+
   /**
    * Respond to an offer of a single executor from the scheduler by finding a task
    *
@@ -446,7 +451,8 @@ private[spark] class TaskSetManager(
       blacklist.isNodeBlacklistedForTaskSet(host) ||
         blacklist.isExecutorBlacklistedForTaskSet(execId)
     }
-    if (!isZombie && !offerBlacklisted) {
+    if (!isZombie && !isDraining && !offerBlacklisted) {
+      // Serving state
       val curTime = clock.getTimeMillis()
 
       var allowedLocality = maxLocality
@@ -516,7 +522,51 @@ private[spark] class TaskSetManager(
           task.localProperties,
           serializedTask)
       }
+    } else if (!isZombie && isDraining && !offerBlacklisted) {
+      // Draining state
+      popShuffleFlushTask(execId, host).map { case (index, task) =>
+        // TODO support task level fault tolerance here
+        val curTime = clock.getTimeMillis()
+        val taskId = sched.newTaskId()
+        val attemptNum = 0
+        val info = new TaskInfo(taskId, index, attemptNum, curTime, execId, host, maxLocality, false)
+        // Serialize and return the task
+        taskInfos(taskId) = info
+        val serializedTask: ByteBuffer = try {
+          ser.serialize(task)
+        } catch {
+          case NonFatal(e) =>
+            val msg = s"Failed to serialize shuffle flush task ${taskId}, not attempting to retry it."
+            logError(msg, e)
+            abort(s"${msg} Exception during serialization: $e")
+            throw new TaskNotSerializableException(e)
+        }
+        if (serializedTask.limit() > TaskSetManager.TASK_SIZE_TO_WARN_KB * 1024 && !emittedTaskSizeWarning) {
+          emittedTaskSizeWarning = true
+          logWarning(s"Stage ${task.stageId} contains a task of very large size " +
+            s"(${serializedTask.limit() / 1024} KB). The maximum recommended task size is " +
+            s"${TaskSetManager.TASK_SIZE_TO_WARN_KB} KB.")
+        }
+        addRunningTask(taskId)
+
+        val taskName = s"shuffle flush task ${index} in stage ${taskSet.id}"
+        logInfo(s"Starting ${taskName} (TID ${taskId}, ${host}, executor ${execId}, " +
+          s"${serializedTask.limit()} bytes)")
+
+        sched.dagScheduler.taskStarted(task, info)
+        new TaskDescription(
+          taskId,
+          attemptNum,
+          execId,
+          taskName,
+          index,
+          addedFiles,
+          addedJars,
+          task.localProperties,
+          serializedTask)
+      }
     } else {
+      // Zombie state
       None
     }
   }
@@ -716,6 +766,65 @@ private[spark] class TaskSetManager(
     }
   }
 
+
+  /** Mapping from executor id to pending flush task id */
+  val shuffleFlushTaskIdForExecutor = new mutable.HashMap[(String, String), Int]()
+  val shuffleFlushTasks = new mutable.HashMap[Int, ShuffleFlushTask]()
+  val pendingFlushExecutors = new mutable.HashSet[(String, String)]()
+  val successfulShuffleFlushTasks = new mutable.HashSet[Int]()
+
+  /** Try to fetch a shuffle flush task given specified executorId and hostId */
+  def popShuffleFlushTask(execId: String, host: String): Option[(Int, ShuffleFlushTask)] = {
+    if (pendingFlushExecutors.contains((host, execId))) {
+      pendingFlushExecutors.remove((host, execId))
+      val index = shuffleFlushTaskIdForExecutor((host, execId))
+      val task = shuffleFlushTasks(index)
+      Option((index, task))
+    } else {
+      None
+    }
+  }
+
+  def isShuffleFlushTask(i: Int): Boolean = (i>=numTasks)
+
+  /**
+    * This is called when all the tasks have turned into successful state. If flushing is not required,
+    * just turn this task set into Zombie state. Otherwise, prepare for draining and turn this task set
+    * into Draining state.
+    */
+  def onAllTasksSuccessful(): Unit = {
+    taskSet.mergingContext match {
+      case Some(mergingContext) =>
+        isDraining = true
+        val mapOutputTracker = env.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+        val distinctHostExecutors = mapOutputTracker
+          .shuffleStatuses(mergingContext.getShuffleId)
+          .withMapStatuses(_.map(status => (status.location.host, status.location.executorId)).distinct)
+        val distinctExecutors = distinctHostExecutors.map(_._2).distinct
+        logInfo(s"Stage ${taskSet.stageId} involves ${distinctHostExecutors.length} distinct (host,executor), and ${distinctExecutors.length} distinct (executor)")
+        for ((host, executorId) <- distinctHostExecutors) {
+          // Pass global task id ( a flush task if task id >= numTasks )
+          val taskId = numTasks + shuffleFlushTasks.size
+          val task = mergingContext.createFlushTask(host, executorId, taskId)
+          shuffleFlushTaskIdForExecutor.put((host, executorId), taskId)
+          shuffleFlushTasks.put(taskId, task)
+          pendingFlushExecutors.add((host, executorId))
+        }
+      case None =>
+        isZombie = true
+    }
+  }
+
+  /**
+    * This would be called only in draining state. It will bring the stage into Zombie state, and
+    * call maybeFinishTaskSet
+    */
+  def onAllShuffleFlushTasksSuccessful() = {
+    require(isDraining && !isZombie, s"Incorrect state ${isDraining} ${isZombie}")
+    isZombie = true
+    maybeFinishTaskSet()
+  }
+
   /**
    * Marks a task as successful and notifies the DAGScheduler that the task has ended.
    */
@@ -728,41 +837,53 @@ private[spark] class TaskSetManager(
     }
     removeRunningTask(tid)
 
-    // Kill any other attempts for the same task (since those are unnecessary now that one
-    // attempt completed successfully).
-    for (attemptInfo <- taskAttempts(index) if attemptInfo.running) {
-      logInfo(s"Killing attempt ${attemptInfo.attemptNumber} for task ${attemptInfo.id} " +
-        s"in stage ${taskSet.id} (TID ${attemptInfo.taskId}) on ${attemptInfo.host} " +
-        s"as the attempt ${info.attemptNumber} succeeded on ${info.host}")
-      killedByOtherAttempt(index) = true
-      sched.backend.killTask(
-        attemptInfo.taskId,
-        attemptInfo.executorId,
-        interruptThread = true,
-        reason = "another attempt succeeded")
-    }
-    if (!successful(index)) {
-      tasksSuccessful += 1
-      logInfo(s"Finished task ${info.id} in stage ${taskSet.id} (TID ${info.taskId}) in" +
-        s" ${info.duration} ms on ${info.host} (executor ${info.executorId})" +
-        s" ($tasksSuccessful/$numTasks)")
-      // Mark successful and stop if all the tasks have succeeded.
-      successful(index) = true
-      if (tasksSuccessful == numTasks) {
-        isZombie = true
+    if (isShuffleFlushTask(index)) {
+      if (!successfulShuffleFlushTasks.contains(index)) {
+        successfulShuffleFlushTasks.add(index)
+        logInfo(s"Finished shuffle flush task ${info.id} in stage ${taskSet.id} (TID ${info.taskId}) in" +
+          s" ${info.duration} ms on ${info.host} (executor ${info.executorId})" +
+          s" (${successfulShuffleFlushTasks.size}/${shuffleFlushTasks.size})")
+        if (successfulShuffleFlushTasks.size == shuffleFlushTasks.size) {
+          onAllShuffleFlushTasksSuccessful()
+        }
       }
     } else {
-      logInfo("Ignoring task-finished event for " + info.id + " in stage " + taskSet.id +
-        " because task " + index + " has already completed successfully")
+      // Kill any other attempts for the same task (since those are unnecessary now that one
+      // attempt completed successfully).
+      for (attemptInfo <- taskAttempts(index) if attemptInfo.running) {
+        logInfo(s"Killing attempt ${attemptInfo.attemptNumber} for task ${attemptInfo.id} " +
+          s"in stage ${taskSet.id} (TID ${attemptInfo.taskId}) on ${attemptInfo.host} " +
+          s"as the attempt ${info.attemptNumber} succeeded on ${info.host}")
+        killedByOtherAttempt(index) = true
+        sched.backend.killTask(
+          attemptInfo.taskId,
+          attemptInfo.executorId,
+          interruptThread = true,
+          reason = "another attempt succeeded")
+      }
+      if (!successful(index)) {
+        tasksSuccessful += 1
+        logInfo(s"Finished task ${info.id} in stage ${taskSet.id} (TID ${info.taskId}) in" +
+          s" ${info.duration} ms on ${info.host} (executor ${info.executorId})" +
+          s" ($tasksSuccessful/$numTasks)")
+        // Mark successful and stop if all the tasks have succeeded.
+        successful(index) = true
+        if (tasksSuccessful == numTasks) {
+          onAllTasksSuccessful()
+        }
+      } else {
+        logInfo("Ignoring task-finished event for " + info.id + " in stage " + taskSet.id +
+          " because task " + index + " has already completed successfully")
+      }
+      // This method is called by "TaskSchedulerImpl.handleSuccessfulTask" which holds the
+      // "TaskSchedulerImpl" lock until exiting. To avoid the SPARK-7655 issue, we should not
+      // "deserialize" the value when holding a lock to avoid blocking other threads. So we call
+      // "result.value()" in "TaskResultGetter.enqueueSuccessfulTask" before reaching here.
+      // Note: "result.value()" only deserializes the value when it's called at the first time, so
+      // here "result.value()" just returns the value and won't block other threads.
+      sched.dagScheduler.taskEnded(tasks(index), Success, result.value(), result.accumUpdates, info)
+      maybeFinishTaskSet()
     }
-    // This method is called by "TaskSchedulerImpl.handleSuccessfulTask" which holds the
-    // "TaskSchedulerImpl" lock until exiting. To avoid the SPARK-7655 issue, we should not
-    // "deserialize" the value when holding a lock to avoid blocking other threads. So we call
-    // "result.value()" in "TaskResultGetter.enqueueSuccessfulTask" before reaching here.
-    // Note: "result.value()" only deserializes the value when it's called at the first time, so
-    // here "result.value()" just returns the value and won't block other threads.
-    sched.dagScheduler.taskEnded(tasks(index), Success, result.value(), result.accumUpdates, info)
-    maybeFinishTaskSet()
   }
 
   /**

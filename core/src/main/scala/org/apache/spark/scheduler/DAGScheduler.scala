@@ -1082,11 +1082,34 @@ class DAGScheduler(
         return
     }
 
+    val mergingContextOpt: Option[MergingContext] = try {
+      val serializedTaskMetrics = closureSerializer.serialize(stage.latestInfo.taskMetrics).array()
+      stage match {
+        case stage: ShuffleMapStage =>
+          val shuffleHandle = stage.shuffleDep.shuffleHandle
+          env.shuffleManager.getFlusher(shuffleHandle).map(new MergingContext(_, stage.id, stage.latestInfo.attemptNumber(), shuffleHandle.shuffleId,
+            taskBinary, properties, serializedTaskMetrics, Option(jobId), Option(sc.applicationId), sc.applicationAttemptId))
+        case _ =>
+          None
+      }
+    } catch {
+      case NonFatal(e) =>
+        abortStage(stage, s"Merging context creation failed: $e\n${Utils.exceptionString(e)}", Some(e))
+        runningStages -= stage
+        return
+    }
+
+    if (mergingContextOpt.isEmpty) {
+      logInfo(s"Stage ${stage.id} does not use a merging context")
+    } else {
+      logInfo(s"Stage ${stage.id} uses a merging context")
+    }
+
     if (tasks.size > 0) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
       taskScheduler.submitTasks(new TaskSet(
-        tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
+        tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties, mergingContextOpt))
     } else {
       // Because we posted SparkListenerStageSubmitted earlier, we should mark
       // the stage as completed here in case there are no tasks to run

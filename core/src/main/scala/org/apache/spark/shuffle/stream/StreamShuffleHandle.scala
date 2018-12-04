@@ -5,6 +5,7 @@
 package org.apache.spark.shuffle.stream
 
 import java.io.{BufferedOutputStream, FileOutputStream}
+import java.nio.channels.FileChannel
 
 import org.apache.spark.ShuffleDependency
 import org.apache.spark.internal.Logging
@@ -23,19 +24,26 @@ private[spark] class StreamShuffleHandle[K, V](
                                  fileBufferBytes: Int)
   extends BaseShuffleHandle(shuffleId, numMaps, dependency) with Logging with BufferedConsumer {
 
+  private var fileChannels: Array[FileChannel] = null
   private var outputStreams: Array[BufferedOutputStream] = null
+
+  private var opened = false
   private var closed = false
 
-  private def open(): Array[BufferedOutputStream] = {
-    val outputStreams = new Array[BufferedOutputStream](numPartitions)
-    logInfo(s"Shuffle ${shuffleId} outputs to reducer input files as ${shuffleBlockResolver.getDataFile(shuffleId, 0).getAbsolutePath}, consumes ${1e-6 * numPartitions * fileBufferBytes} MB memory for file buffer")
-    for (i <- 0 until numPartitions) {
-      val reducerFile = shuffleBlockResolver.getDataFile(shuffleId, i)
-      val fos = new FileOutputStream(reducerFile)
-      val bos = new BufferedOutputStream(fos, fileBufferBytes)
-      outputStreams(i) = bos
+  private def open() = {
+    if (!opened) {
+      opened = true
+      logInfo(s"Shuffle ${shuffleId} outputs to reducer input files as ${shuffleBlockResolver.getDataFile(shuffleId, 0).getAbsolutePath}, consumes ${1e-6 * numPartitions * fileBufferBytes} MB memory for file buffer")
+      fileChannels = new Array[FileChannel](numPartitions)
+      outputStreams = new Array[BufferedOutputStream](numPartitions)
+      for (i <- 0 until numPartitions) {
+        val reducerFile = shuffleBlockResolver.getDataFile(shuffleId, i)
+        val fos = new FileOutputStream(reducerFile)
+        fileChannels(i) = fos.getChannel
+        val bos = new BufferedOutputStream(fos, fileBufferBytes)
+        outputStreams(i) = bos
+      }
     }
-    outputStreams
   }
 
   /**
@@ -48,7 +56,7 @@ private[spark] class StreamShuffleHandle[K, V](
       throw new Exception("Try to get buffered output streams from a closed handle")
     }
     if (outputStreams == null) {
-      outputStreams = open()
+      open()
     }
     outputStreams
   }
@@ -78,6 +86,11 @@ private[spark] class StreamShuffleHandle[K, V](
         }
       }
     }
+  }
+
+  /** Get the length (number of bytes) for each reducer partition */
+  def getPartitionLengths(): Array[Long] = {
+    fileChannels.map(_.size())
   }
 }
 

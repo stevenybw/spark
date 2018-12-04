@@ -20,9 +20,7 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   * this design has several advantages:
   *
   *   - Bounded memory management: saves more memory for RDD cache
-  *
   *   - Spill-free in-memory merging: good efficiency without the overhead of merging the spills
-  *
   *   - High I/O efficiency: solves the problem coming from large amount of reducers
   *
   * There are several challenge to implement such technique:
@@ -31,9 +29,21 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   *   exactly one index file and one data file, which is implemented in IndexShuffleBlockResolver. However,
   *   streaming shuffler requires that a single shuffle task is allowed to generate multiple files (one file
   *   per reducer partition). We provide [[StreamShuffleBlockResolver]] to adapt to this format.
-  *     As a proof-of-concept to demonstrates that we can implement CSF in Spark, we
-  *   implement [[StreamShuffleWriterWithoutMerging]]. This is the same as BypassMergeSortShuffle, except that we
-  *   do not try to merge the output files into one map output file.
+  *
+  * We have implemented several versions:
+  *   - As a proof-of-concept to demonstrates that we can implement CSF in Spark, we implement
+  *   [[StreamShuffleWriterWithoutMerging]]. This is the same as BypassMergeSortShuffle, except that we
+  *   do not try to merge the output files into one map output file. The problems of this design:
+  *     * Inefficiency when R is large. [[SortShuffleManager]] tackles this problem by requiring that R<=200 to apply
+  *     bypass-merge-sort shuffle. When R>200, SortShuffle uses UnsafeShuffleWriter.
+  *     * There would be O(M*R) small files, which would lead to pressures to file system. Our solution is
+  *     to apply executor-side merging.
+  *   - Enabling executor-side merging, we implement [[StreamShuffleWriter]]. This version ignores fault tolerant and
+  *   is to demonstrate the performance aspect. A shared buffered output streams is stored in StreamShuffleHandle. The
+  *   StreamShuffleWriter do the serialization and sorting locally, and append the content into the shared output streams.
+  *   One key problem is: when the executor drain the buffer and add the mapOutput to the driver? Obviously, when the
+  *   shuffle stage has been finished. So,
+  *   This version is a demo for performance, and totally ignore the fault tolerance.
   *
   * @param conf
   */
@@ -101,6 +111,20 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           mapId,
           context,
           env.conf)
+    }
+  }
+
+
+  override def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher] = {
+    val env = SparkEnv.get
+    handle match {
+      case streamShuffleHandle: StreamShuffleHandle[_, _] =>
+        Option(new StreamShuffleFlusher(
+          env.blockManager,
+          streamShuffleHandle,
+          env.conf))
+      case streamShuffleWithoutMergingHandle: StreamShuffleWithoutMergingHandle[_, _] =>
+        None
     }
   }
 

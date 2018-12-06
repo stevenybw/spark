@@ -1306,44 +1306,46 @@ class DAGScheduler(
 
             // This stage can be considered finished only after shuffleStage is not required
             if (runningStages.contains(shuffleStage) && shuffleStage.pendingPartitions.isEmpty) {
-              markStageAsFinished(shuffleStage)
-              logInfo("looking for newly runnable stages")
-              logInfo("running: " + runningStages)
-              logInfo("waiting: " + waitingStages)
-              logInfo("failed: " + failedStages)
+              if (!shuffleStage.flushRequired) {
+                markStageAsFinished(shuffleStage)
+                logInfo("looking for newly runnable stages")
+                logInfo("running: " + runningStages)
+                logInfo("waiting: " + waitingStages)
+                logInfo("failed: " + failedStages)
 
-              // This call to increment the epoch may not be strictly necessary, but it is retained
-              // for now in order to minimize the changes in behavior from an earlier version of the
-              // code. This existing behavior of always incrementing the epoch following any
-              // successful shuffle map stage completion may have benefits by causing unneeded
-              // cached map outputs to be cleaned up earlier on executors. In the future we can
-              // consider removing this call, but this will require some extra investigation.
-              // See https://github.com/apache/spark/pull/17955/files#r117385673 for more details.
-              mapOutputTracker.incrementEpoch()
+                // This call to increment the epoch may not be strictly necessary, but it is retained
+                // for now in order to minimize the changes in behavior from an earlier version of the
+                // code. This existing behavior of always incrementing the epoch following any
+                // successful shuffle map stage completion may have benefits by causing unneeded
+                // cached map outputs to be cleaned up earlier on executors. In the future we can
+                // consider removing this call, but this will require some extra investigation.
+                // See https://github.com/apache/spark/pull/17955/files#r117385673 for more details.
+                mapOutputTracker.incrementEpoch()
 
-              clearCacheLocs()
+                clearCacheLocs()
 
-              if (!shuffleStage.isAvailable) {
-                // Some tasks had failed; let's resubmit this shuffleStage.
-                // TODO: Lower-level scheduler should also deal with this
-                logInfo("Resubmitting " + shuffleStage + " (" + shuffleStage.name +
-                  ") because some of its tasks had failed: " +
-                  shuffleStage.findMissingPartitions().mkString(", "))
-                submitStage(shuffleStage)
-              } else {
-                // Mark any map-stage jobs waiting on this stage as finished
-                if (shuffleStage.mapStageJobs.nonEmpty) {
-                  val stats = mapOutputTracker.getStatistics(shuffleStage.shuffleDep)
-                  for (job <- shuffleStage.mapStageJobs) {
-                    markMapStageJobAsFinished(job, stats)
+                if (!shuffleStage.isAvailable) {
+                  // Some tasks had failed; let's resubmit this shuffleStage.
+                  // TODO: Lower-level scheduler should also deal with this
+                  logInfo("Resubmitting " + shuffleStage + " (" + shuffleStage.name +
+                    ") because some of its tasks had failed: " +
+                    shuffleStage.findMissingPartitions().mkString(", "))
+                  submitStage(shuffleStage)
+                } else {
+                  // Mark any map-stage jobs waiting on this stage as finished
+                  if (shuffleStage.mapStageJobs.nonEmpty) {
+                    val stats = mapOutputTracker.getStatistics(shuffleStage.shuffleDep)
+                    for (job <- shuffleStage.mapStageJobs) {
+                      markMapStageJobAsFinished(job, stats)
+                    }
                   }
+                  submitWaitingChildStages(shuffleStage)
                 }
-                submitWaitingChildStages(shuffleStage)
+              } else {
+                shuffleStage.startDraining()
+                logInfo(s"the last shuffle map task has finished, stage ${shuffleStage.id} " +
+                  s"enters draining with ${shuffleStage.pendingShuffleFlushTasks.size} pending shuffle flush tasks.")
               }
-            } else {
-              shuffleStage.startDraining()
-              logInfo(s"the last shuffle map task has finished, stage ${shuffleStage.id} " +
-                s"enters draining with ${shuffleStage.pendingShuffleFlushTasks.size} pending shuffle flush tasks.")
             }
           case sft: ShuffleFlushTask =>
             val shuffleStage = stage.asInstanceOf[ShuffleMapStage]

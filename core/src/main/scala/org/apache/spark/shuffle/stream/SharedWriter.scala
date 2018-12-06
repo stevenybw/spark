@@ -11,13 +11,10 @@ import org.apache.spark.internal.Logging
 
 /**
   * Shared writer is a lazy-initialized collection of buffered file output streams.
-  * @param shuffleId
-  * @param numPartitions
-  * @param shuffleBlockResolver
-  * @param fileBufferBytes
   */
 private[spark] class SharedWriter(
   shuffleId: Int,
+  numMaps: Int,
   numPartitions: Int,
   shuffleBlockResolver: StreamShuffleBlockResolver,
   fileBufferBytes: Int) extends Logging with BufferedConsumer {
@@ -27,9 +24,9 @@ private[spark] class SharedWriter(
   private var outputStreams = new Array[BufferedOutputStream](numPartitions)
   private var closed = false
 
-  logInfo(s"Shuffle ${shuffleId} outputs to reducer input files as ${shuffleBlockResolver.getDataFile(shuffleId, 0).getAbsolutePath}, consumes ${1e-6 * numPartitions * fileBufferBytes} MB memory for file buffer")
+  logInfo(s"Shuffle ${shuffleId} outputs to reducer input files as ${shuffleBlockResolver.getMergedDataFile(shuffleId, 0, numMaps).getAbsolutePath}, consumes ${1e-6 * numPartitions * fileBufferBytes} MB memory for file buffer")
   for (i <- 0 until numPartitions) {
-    val reducerFile = shuffleBlockResolver.getDataFile(shuffleId, i)
+    val reducerFile = shuffleBlockResolver.getMergedDataFile(shuffleId, i, numMaps)
     val fos = new FileOutputStream(reducerFile)
     fileChannels(i) = fos.getChannel
     val bos = new BufferedOutputStream(fos, fileBufferBytes)

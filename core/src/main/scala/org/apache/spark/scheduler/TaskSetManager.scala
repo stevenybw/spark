@@ -787,6 +787,24 @@ private[spark] class TaskSetManager(
 
   def isShuffleFlushTask(i: Int): Boolean = i>=numTasks
 
+  val involvedHostExecutors = new mutable.HashSet[(String, String)]()
+
+  /**
+    * This subscribes for task success information to maintain a list of involved executors
+    */
+  private[this] def onTaskSuccessful(task: Task[_], taskId: String, result: Any): Unit = {
+    task match {
+      case smt: ShuffleMapTask =>
+        val status = result.asInstanceOf[MapStatus]
+        val hostExecId = (status.location.host, status.location.executorId)
+        if (!involvedHostExecutors.contains(hostExecId)) {
+          logInfo(s"A new executor found: ${hostExecId._1}:${hostExecId._2}")
+        }
+        involvedHostExecutors.add(hostExecId)
+      case _ =>
+    }
+  }
+
   /**
     * This is called when all the tasks have turned into successful state. If flushing is not required,
     * just turn this task set into Zombie state. Otherwise, prepare for draining and turn this task set
@@ -796,10 +814,7 @@ private[spark] class TaskSetManager(
     taskSet.mergingContext match {
       case Some(mergingContext) =>
         isDraining = true
-        val mapOutputTracker = env.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
-        val distinctHostExecutors = mapOutputTracker
-          .shuffleStatuses(mergingContext.getShuffleId)
-          .withMapStatuses(_.map(status => (status.location.host, status.location.executorId)).distinct)
+        val distinctHostExecutors = involvedHostExecutors.toArray
         val distinctExecutors = distinctHostExecutors.map(_._2).distinct
         logInfo(s"Stage ${taskSet.stageId} involves ${distinctHostExecutors.length} distinct (host,executor), and ${distinctExecutors.length} distinct (executor)")
         for ((host, executorId) <- distinctHostExecutors) {
@@ -822,7 +837,6 @@ private[spark] class TaskSetManager(
   def onAllShuffleFlushTasksSuccessful() = {
     require(isDraining && !isZombie, s"Incorrect state ${isDraining} ${isZombie}")
     isZombie = true
-    maybeFinishTaskSet()
   }
 
   /**
@@ -837,7 +851,9 @@ private[spark] class TaskSetManager(
     }
     removeRunningTask(tid)
 
+    var task: Task[_] = null
     if (isShuffleFlushTask(index)) {
+      task = shuffleFlushTasks(index)
       if (!successfulShuffleFlushTasks.contains(index)) {
         successfulShuffleFlushTasks.add(index)
         logInfo(s"Finished shuffle flush task ${info.id} in stage ${taskSet.id} (TID ${info.taskId}) in" +
@@ -848,6 +864,7 @@ private[spark] class TaskSetManager(
         }
       }
     } else {
+      task = tasks(index)
       // Kill any other attempts for the same task (since those are unnecessary now that one
       // attempt completed successfully).
       for (attemptInfo <- taskAttempts(index) if attemptInfo.running) {
@@ -861,6 +878,7 @@ private[spark] class TaskSetManager(
           interruptThread = true,
           reason = "another attempt succeeded")
       }
+
       if (!successful(index)) {
         tasksSuccessful += 1
         logInfo(s"Finished task ${info.id} in stage ${taskSet.id} (TID ${info.taskId}) in" +
@@ -868,6 +886,7 @@ private[spark] class TaskSetManager(
           s" ($tasksSuccessful/$numTasks)")
         // Mark successful and stop if all the tasks have succeeded.
         successful(index) = true
+        onTaskSuccessful(task, info.id, result.value())
         if (tasksSuccessful == numTasks) {
           onAllTasksSuccessful()
         }
@@ -875,15 +894,15 @@ private[spark] class TaskSetManager(
         logInfo("Ignoring task-finished event for " + info.id + " in stage " + taskSet.id +
           " because task " + index + " has already completed successfully")
       }
-      // This method is called by "TaskSchedulerImpl.handleSuccessfulTask" which holds the
-      // "TaskSchedulerImpl" lock until exiting. To avoid the SPARK-7655 issue, we should not
-      // "deserialize" the value when holding a lock to avoid blocking other threads. So we call
-      // "result.value()" in "TaskResultGetter.enqueueSuccessfulTask" before reaching here.
-      // Note: "result.value()" only deserializes the value when it's called at the first time, so
-      // here "result.value()" just returns the value and won't block other threads.
-      sched.dagScheduler.taskEnded(tasks(index), Success, result.value(), result.accumUpdates, info)
-      maybeFinishTaskSet()
     }
+    // This method is called by "TaskSchedulerImpl.handleSuccessfulTask" which holds the
+    // "TaskSchedulerImpl" lock until exiting. To avoid the SPARK-7655 issue, we should not
+    // "deserialize" the value when holding a lock to avoid blocking other threads. So we call
+    // "result.value()" in "TaskResultGetter.enqueueSuccessfulTask" before reaching here.
+    // Note: "result.value()" only deserializes the value when it's called at the first time, so
+    // here "result.value()" just returns the value and won't block other threads.
+    sched.dagScheduler.taskEnded(task, Success, result.value(), result.accumUpdates, info)
+    maybeFinishTaskSet()
   }
 
   /**

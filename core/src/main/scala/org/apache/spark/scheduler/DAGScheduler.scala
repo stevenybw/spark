@@ -1304,6 +1304,7 @@ class DAGScheduler(
               shuffleStage.pendingPartitions -= task.partitionId
             }
 
+            // This stage can be considered finished only after shuffleStage is not required
             if (runningStages.contains(shuffleStage) && shuffleStage.pendingPartitions.isEmpty) {
               markStageAsFinished(shuffleStage)
               logInfo("looking for newly runnable stages")
@@ -1339,6 +1340,42 @@ class DAGScheduler(
                 }
                 submitWaitingChildStages(shuffleStage)
               }
+            } else {
+              shuffleStage.startDraining()
+              logInfo(s"the last shuffle map task has finished, stage ${shuffleStage.id} " +
+                s"enters draining with ${shuffleStage.pendingShuffleFlushTasks.size} pending shuffle flush tasks.")
+            }
+          case sft: ShuffleFlushTask =>
+            val shuffleStage = stage.asInstanceOf[ShuffleMapStage]
+            val status = event.result.asInstanceOf[MapStatus]
+            val hostExecId = (status.location.host, status.location.executorId)
+            val execId = status.location.executorId
+            logInfo(s"ShuffleFlushTask finished on ${execId}")
+            require(shuffleStage.isDraining)
+            require(stageIdToStage(task.stageId).latestInfo.attemptNumber() == task.stageAttemptId, "stage attempt id mismatch")
+            shuffleStage.pendingShuffleFlushTasks.remove(hostExecId)
+            require(!(failedEpoch.contains(execId) && sft.epoch <= failedEpoch(execId)), "failed scenario to do in the future")
+            mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId, sft.partitionId, status)
+            // shuffleStage.pendingFlushTask -= task.partitionId
+            require(runningStages.contains(shuffleStage), "a shuffle flush task to not running stage detected")
+            if (runningStages.contains(shuffleStage) && shuffleStage.pendingShuffleFlushTasks.isEmpty) {
+              logInfo(s"the last shuffle flush task has finished, stage ${shuffleStage.id} finished")
+              markStageAsFinished(shuffleStage)
+              logInfo("looking for newly runnable stages")
+              logInfo("running: " + runningStages)
+              logInfo("waiting: " + waitingStages)
+              logInfo("failed: " + failedStages)
+
+              mapOutputTracker.incrementEpoch()
+              clearCacheLocs()
+              require(shuffleStage.isAvailable, "some tasks had failed when draining")
+              if (shuffleStage.mapStageJobs.nonEmpty) {
+                val stats = mapOutputTracker.getStatistics(shuffleStage.shuffleDep)
+                for (job <- shuffleStage.mapStageJobs) {
+                  markMapStageJobAsFinished(job, stats)
+                }
+              }
+              submitWaitingChildStages(shuffleStage)
             }
         }
 

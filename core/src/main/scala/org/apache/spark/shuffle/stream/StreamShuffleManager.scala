@@ -4,10 +4,7 @@
 
 package org.apache.spark.shuffle.stream
 
-import java.io.BufferedOutputStream
-import java.util.concurrent.ConcurrentHashMap
-
-import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
+import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle._
 import org.apache.spark.shuffle.sort.SortShuffleManager
@@ -38,6 +35,11 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   *     bypass-merge-sort shuffle. When R>200, SortShuffle uses UnsafeShuffleWriter.
   *     * There would be O(M*R) small files, which would lead to pressures to file system. Our solution is
   *     to apply executor-side merging.
+  *
+  *   - As a proof-of-concept to demonstrates that by executor-side merging we can reduce the number of files to
+  *   O(R), we adapt [[StreamShuffleWriterWithoutMerging]] to [[StreamShuffleWriterDirect]]. For each record, it will
+  *   append the result directly into shared buffer.
+  *
   *   - Enabling executor-side merging, we implement [[StreamShuffleWriter]]. This version ignores fault tolerant and
   *   is to demonstrate the performance aspect. A shared buffered output streams is stored in StreamShuffleHandle. The
   *   StreamShuffleWriter do the serialization and sorting locally, and append the content into the shared output streams.
@@ -48,9 +50,8 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   * @param conf
   */
 private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {
-  val useUnmergedShuffle = true
-  val fileBufferBytes = conf.getInt("spark.shuffle.stream.file_buffer_size", 1024*1024)
-  private[this] val activeBufferedConsumer = new ConcurrentHashMap[Int, BufferedConsumer]()
+  private val fileBufferBytes = conf.getSizeAsKb("spark.shuffle.file.buffer", "32k").toInt * 1024
+  private val shuffleMethod = conf.get("spark.shuffle.stream.method", "unmerged_direct")
 
   /**
     * Return a resolver capable of retrieving shuffle block data based on block coordinates.
@@ -64,26 +65,32 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
                                         numMaps: Int,
                                         dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     val numPartitions = dependency.partitioner.numPartitions
-    if (!useUnmergedShuffle) {
-      logInfo(s"StreamShuffle registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
-      // Streaming shuffle must support serialized shuffle
-      assert(SortShuffleManager.canUseSerializedShuffle(dependency))
-      val streamShuffleHandle = new StreamShuffleHandle[K, V](
-        shuffleId,
-        numMaps,
-        dependency.asInstanceOf[ShuffleDependency[K, V, V]],
-        numPartitions,
-        shuffleBlockResolver.asInstanceOf[StreamShuffleBlockResolver],
-        fileBufferBytes)
-      activeBufferedConsumer.putIfAbsent(shuffleId, streamShuffleHandle)
-      streamShuffleHandle
-    } else {
-      logInfo(s"StreamShuffleWithoutMerging registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
-      assert(!dependency.mapSideCombine, "Unable to use stream shuffle manager with mapSideCombine enabled");
-      new StreamShuffleWithoutMergingHandle[K, V](
-        shuffleId,
-        numMaps,
-        dependency.asInstanceOf[ShuffleDependency[K, V, V]])
+    shuffleMethod match {
+      case "merged_batched" =>
+        logInfo(s"StreamShuffle registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
+        // Streaming shuffle must support serialized shuffle
+        assert(SortShuffleManager.canUseSerializedShuffle(dependency))
+        new StreamShuffleHandle[K, V](
+          shuffleId,
+          numMaps,
+          dependency.asInstanceOf[ShuffleDependency[K, V, V]],
+          numPartitions)
+      case "unmerged_direct" =>
+        logInfo(s"StreamShuffleWithoutMerging registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
+        assert(!dependency.mapSideCombine, "Unable to use stream shuffle manager with mapSideCombine enabled");
+        new StreamShuffleWithoutMergingHandle[K, V](
+          shuffleId,
+          numMaps,
+          dependency.asInstanceOf[ShuffleDependency[K, V, V]])
+      case "merged_direct" =>
+        logInfo(s"StreamShuffleDirect registered: id = ${shuffleId}  numMaps = ${numMaps}   numReducers = ${numPartitions}")
+        assert(SortShuffleManager.canUseSerializedShuffle(dependency))
+        new StreamShuffleDirectHandle[K, V](
+          shuffleId,
+          numMaps,
+          dependency.asInstanceOf[ShuffleDependency[K, V, V]],
+          numPartitions
+        )
     }
   }
 
@@ -95,6 +102,16 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
     val env = SparkEnv.get
     handle match {
       case streamShuffleHandle: StreamShuffleHandle[K @unchecked, V @unchecked] =>
+        val shuffleId = streamShuffleHandle.shuffleId
+        val numPartitions = streamShuffleHandle.numPartitions
+        val sharedObjectManager = env.sharedObjectManager
+        val objid = StreamShuffleManager.STREAM_SHUFFLE_PREFIX + shuffleId.toString
+        val sharedWriter = sharedObjectManager.getOrCreate(objid, (x: String) => new SharedWriter(
+            shuffleId,
+            numPartitions,
+            shuffleBlockResolver,
+            fileBufferBytes))
+        logInfo(s"Task ${mapId} from batched shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
         new StreamShuffleWriter(
           env.blockManager,
           shuffleBlockResolver.asInstanceOf[StreamShuffleBlockResolver],
@@ -102,7 +119,8 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           streamShuffleHandle,
           mapId,
           context,
-          env.conf)
+          env.conf,
+          sharedWriter)
       case streamShuffleWithoutMergingHandle: StreamShuffleWithoutMergingHandle[K @unchecked, V @unchecked] =>
         new StreamShuffleWriterWithoutMerging(
           env.blockManager,
@@ -110,6 +128,25 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           streamShuffleWithoutMergingHandle,
           mapId,
           context,
+          env.conf)
+      case streamShuffleDirectHandle: StreamShuffleDirectHandle[K @unchecked, V @unchecked] =>
+        val shuffleId = streamShuffleDirectHandle.shuffleId
+        val numPartitions = streamShuffleDirectHandle.numPartitions
+        val sharedObjectManager = env.sharedObjectManager
+        val objid = StreamShuffleManager.STREAM_SHUFFLE_PREFIX + shuffleId.toString
+        val sharedWriter = sharedObjectManager.getOrCreate(objid, (x: String) => new SharedWriter(
+          shuffleId,
+          numPartitions,
+          shuffleBlockResolver,
+          fileBufferBytes))
+        logInfo(s"Task ${mapId} from direct shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
+        new StreamShuffleWriterDirect(
+          env.blockManager,
+          shuffleBlockResolver,
+          streamShuffleDirectHandle,
+          mapId,
+          context,
+          sharedWriter,
           env.conf)
     }
   }
@@ -119,10 +156,26 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
     val env = SparkEnv.get
     handle match {
       case streamShuffleHandle: StreamShuffleHandle[_, _] =>
+        val shuffleId = streamShuffleHandle.shuffleId
+        val sharedObjectManager = env.sharedObjectManager
+        val objid = StreamShuffleManager.STREAM_SHUFFLE_PREFIX + shuffleId.toString
+        val sharedWriter = sharedObjectManager.get(objid).asInstanceOf[SharedWriter]
+        logInfo(s"Shuffle flush task from shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
         Option(new StreamShuffleFlusher(
           env.blockManager,
-          streamShuffleHandle,
+          sharedWriter,
           env.conf))
+      case streamShuffleDirectHandle: StreamShuffleDirectHandle[_, _] =>
+        val shuffleId = streamShuffleDirectHandle.shuffleId
+        val sharedObjectManager = env.sharedObjectManager
+        val objid = StreamShuffleManager.STREAM_SHUFFLE_PREFIX + shuffleId.toString
+        val sharedWriter = sharedObjectManager.get(objid).asInstanceOf[SharedWriter]
+        logInfo(s"Shuffle flush task from shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
+        Option(new StreamShuffleFlusher(
+          env.blockManager,
+          sharedWriter,
+          env.conf))
+
       case streamShuffleWithoutMergingHandle: StreamShuffleWithoutMergingHandle[_, _] =>
         None
     }
@@ -147,11 +200,6 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
     * @return true if the metadata removed successfully, otherwise false.
     */
   override def unregisterShuffle(shuffleId: Int): Boolean = {
-    val bufferedConsumer = activeBufferedConsumer.get(shuffleId)
-    if (bufferedConsumer != null) {
-      bufferedConsumer.close()
-      activeBufferedConsumer.remove(shuffleId);
-    }
     true
   }
 
@@ -159,4 +207,29 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
   override def stop(): Unit = {
     shuffleBlockResolver.stop()
   }
+}
+
+private[spark] class StreamShuffleHandle[K, V](shuffleId: Int,
+                                               numMaps: Int,
+                                               dependency: ShuffleDependency[K, V, V],
+                                               val numPartitions: Int)
+  extends BaseShuffleHandle(shuffleId, numMaps, dependency) {
+}
+
+private[spark] class StreamShuffleDirectHandle[K, V](shuffleId: Int,
+                                                     numMaps: Int,
+                                                     dependency: ShuffleDependency[K, V, V],
+                                                     val numPartitions: Int)
+  extends BaseShuffleHandle(shuffleId, numMaps, dependency) {
+}
+
+private[spark] class StreamShuffleWithoutMergingHandle[K, V](shuffleId: Int,
+                                                             numMaps: Int,
+                                                             dependency: ShuffleDependency[K, V, V])
+  extends BaseShuffleHandle(shuffleId, numMaps, dependency) with Logging {
+}
+
+
+object StreamShuffleManager {
+  val STREAM_SHUFFLE_PREFIX = "stream_shuffle_"
 }

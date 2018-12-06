@@ -9,10 +9,11 @@ import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.ShuffleFlusher
 import org.apache.spark.storage.BlockManager
 
-class StreamShuffleFlusher(blockManager: BlockManager, streamShuffleHandle: StreamShuffleHandle[_, _], conf: SparkConf) extends ShuffleFlusher {
+class StreamShuffleFlusher(blockManager: BlockManager, sharedWriter: SharedWriter, conf: SparkConf) extends ShuffleFlusher {
   override def flush(): MapStatus = {
-    streamShuffleHandle.flush()
-    val partitionLengths = streamShuffleHandle.getPartitionLengths()
+    sharedWriter.flush()
+    val partitionLengths = sharedWriter.getPartitionLengths()
+    sharedWriter.close()
     MapStatus(blockManager.shuffleServerId, partitionLengths)
   }
 }

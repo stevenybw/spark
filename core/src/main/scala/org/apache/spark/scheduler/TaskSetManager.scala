@@ -21,17 +21,17 @@ import java.io.NotSerializableException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 
+import org.apache.spark.TaskState.TaskState
+import org.apache.spark._
+import org.apache.spark.internal.{Logging, config}
+import org.apache.spark.scheduler.SchedulingMode._
+import org.apache.spark.util.collection.MedianHeap
+import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, Utils}
+
+import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.math.max
 import scala.util.control.NonFatal
-import org.apache.spark._
-import org.apache.spark.TaskState.TaskState
-import org.apache.spark.internal.{Logging, config}
-import org.apache.spark.scheduler.SchedulingMode._
-import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, Utils}
-import org.apache.spark.util.collection.MedianHeap
-
-import scala.collection.mutable
 
 /**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
@@ -785,7 +785,7 @@ private[spark] class TaskSetManager(
     }
   }
 
-  def isShuffleFlushTask(i: Int): Boolean = (i>=numTasks)
+  def isShuffleFlushTask(i: Int): Boolean = i>=numTasks
 
   /**
     * This is called when all the tasks have turned into successful state. If flushing is not required,
@@ -1128,7 +1128,7 @@ private[spark] class TaskSetManager(
    *
    */
   private def computeValidLocalityLevels(): Array[TaskLocality.TaskLocality] = {
-    import TaskLocality.{PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY}
+    import TaskLocality._
     val levels = new ArrayBuffer[TaskLocality.TaskLocality]
     if (!pendingTasksForExecutor.isEmpty &&
         pendingTasksForExecutor.keySet.exists(sched.isExecutorAlive(_))) {

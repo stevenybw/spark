@@ -18,10 +18,11 @@
 package org.apache.spark.scheduler
 
 import scala.collection.mutable.HashSet
-
-import org.apache.spark.{MapOutputTrackerMaster, ShuffleDependency}
+import org.apache.spark.{MapOutputTrackerMaster, ShuffleDependency, SparkEnv}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.CallSite
+
+import scala.collection.mutable
 
 /**
  * ShuffleMapStages are intermediate stages in the execution DAG that produce data for a shuffle.
@@ -45,6 +46,7 @@ private[spark] class ShuffleMapStage(
     mapOutputTrackerMaster: MapOutputTrackerMaster)
   extends Stage(id, rdd, numTasks, parents, firstJobId, callSite) {
 
+  private[this] var _isDraining = false
   private[this] var _mapStageJobs: List[ActiveJob] = Nil
 
   /**
@@ -57,6 +59,32 @@ private[spark] class ShuffleMapStage(
    * will always be a subset of the partitions that the TaskSetManager thinks are pending).
    */
   val pendingPartitions = new HashSet[Int]
+
+  /** Shuffle flush tasks expected (host, execId) */
+  val pendingShuffleFlushTasks = new HashSet[(String, String)]
+
+  /** When all the pending partitions have finished, the stage enters into draining state */
+  def isDraining: Boolean = _isDraining
+
+  /** Return true if this stage require flushing */
+  def flushRequired: Boolean = {
+    SparkEnv.get.shuffleManager.getFlusher(shuffleDep.shuffleHandle).isDefined
+  }
+
+  /**
+    * Transform this stage from serving to draining, this will initiate pendingShuffleFlushTasks
+    */
+  def startDraining(): Unit = {
+    require(!_isDraining)
+    _isDraining = true
+    val shuffleId = shuffleDep.shuffleId
+    mapOutputTrackerMaster
+      .shuffleStatuses(shuffleId)
+      .mapStatuses
+      .map(m => (m.location.host, m.location.executorId))
+      .distinct
+      .foreach(t => pendingShuffleFlushTasks.add(t))
+  }
 
   override def toString: String = "ShuffleMapStage " + id
 

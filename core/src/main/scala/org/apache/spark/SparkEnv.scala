@@ -68,6 +68,7 @@ class SparkEnv (
     val metricsSystem: MetricsSystem,
     val memoryManager: MemoryManager,
     val outputCommitCoordinator: OutputCommitCoordinator,
+    val sharedObjectManager: SharedObjectManager,
     val conf: SparkConf) extends Logging {
 
   private[spark] var isStopped = false
@@ -372,6 +373,8 @@ object SparkEnv extends Logging {
       new OutputCommitCoordinatorEndpoint(rpcEnv, outputCommitCoordinator))
     outputCommitCoordinator.coordinatorRef = Some(outputCommitCoordinatorRef)
 
+    val sharedObjectManager = new SharedObjectManager
+
     val envInstance = new SparkEnv(
       executorId,
       rpcEnv,
@@ -386,6 +389,7 @@ object SparkEnv extends Logging {
       metricsSystem,
       memoryManager,
       outputCommitCoordinator,
+      sharedObjectManager,
       conf)
 
     // Add a reference to tmp dir created by driver, we will delete this tmp dir when stop() is

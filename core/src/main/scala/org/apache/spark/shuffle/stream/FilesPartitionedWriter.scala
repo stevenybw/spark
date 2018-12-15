@@ -10,14 +10,15 @@ import java.nio.channels.FileChannel
 import org.apache.spark.internal.Logging
 
 /**
-  *
+  * The partitioned writer based on creating numPartitions files. It targets for optimized I/O by combining fragmented
+  * writes into large continuous write that is suitable for that I/O device.
   */
 private[spark] class FilesPartitionedWriter (
   shuffleId: Int,
   numMaps: Int,
   numPartitions: Int,
   shuffleBlockResolver: StreamShuffleBlockResolver,
-  fileBufferBytes: Int) extends Logging with BufferedConsumer {
+  fileBufferBytes: Int) extends Logging {
 
   // In-memory merging state should not be passed to others
   private var fileChannels = new Array[FileChannel](numPartitions)
@@ -45,6 +46,16 @@ private[spark] class FilesPartitionedWriter (
     outputStreams
   }
 
+  /**
+    * We can also wrap the
+    */
+//  def getPartitionOutputStream(partitionId: Int): PartitionOutputStream = {
+//
+//  }
+
+  /**
+    * Append to partitionId's shuffle output with an exclusive lock
+    */
   def append(partitionId: Int, buffer: Array[Byte], bytes: Int): Unit = {
     outputStreams(partitionId).write(buffer, 0, bytes)
   }
@@ -52,7 +63,7 @@ private[spark] class FilesPartitionedWriter (
   /**
     * Close the consumer and release the resources
     */
-  override def close(): Unit = {
+  def close(): Unit = {
     if (!closed) {
       for (bos <- outputStreams) {
         bos.flush()
@@ -67,11 +78,13 @@ private[spark] class FilesPartitionedWriter (
   /**
     * Flush the buffered content into downstream
     */
-  override def flush(): Unit = {
+  def flush(metrics: ConcurrentCombinerMetrics): Unit = {
     if(!closed) {
+      metrics.writeDuration -= System.nanoTime()
       for (bos <- outputStreams) {
         bos.flush()
       }
+      metrics.writeDuration += System.nanoTime()
     }
   }
 

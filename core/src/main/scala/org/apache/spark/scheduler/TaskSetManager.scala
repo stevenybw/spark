@@ -811,8 +811,8 @@ private[spark] class TaskSetManager(
     * into Draining state.
     */
   def onAllTasksSuccessful(): Unit = {
-    taskSet.mergingContext match {
-      case Some(mergingContext) =>
+    taskSet.flushTaskCreaterOpt match {
+      case Some(flushTaskCreater) =>
         isDraining = true
         val distinctHostExecutors = involvedHostExecutors.toArray
         val distinctExecutors = distinctHostExecutors.map(_._2).distinct
@@ -820,7 +820,7 @@ private[spark] class TaskSetManager(
         for ((host, executorId) <- distinctHostExecutors) {
           // Pass global task id ( a flush task if task id >= numTasks )
           val taskId = numTasks + shuffleFlushTasks.size
-          val task = mergingContext.createFlushTask(host, executorId, taskId)
+          val task = flushTaskCreater.createFlushTask(host, executorId, taskId)
           shuffleFlushTaskIdForExecutor.put((host, executorId), taskId)
           shuffleFlushTasks.put(taskId, task)
           pendingFlushExecutors.add((host, executorId))

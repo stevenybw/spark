@@ -29,7 +29,7 @@ class ConcurrentCombiner[K, V, C](shuffleId: Int,
                                   aggregator: Aggregator[K, V, C],
                                   serializer: Serializer,
                                   private[stream] var filesPartitionedWriter: FilesPartitionedWriter)
-extends Logging with BufferedConsumer {
+extends Logging {
   private var closed = false
   private val numShards = 1<<numShardsPowerOfTwo
 
@@ -55,29 +55,29 @@ extends Logging with BufferedConsumer {
     * Write a record into this collection. This method is thread-safe.
     * @param record
     */
-  def insert(record: Product2[K, V]): Unit = {
+  def insert(record: Product2[K, V], metrics: ConcurrentCombinerMetrics): Unit = {
     val partitionId = partitioner.getPartition(record._1)
     val shardId = shardIdFromPartitionId(partitionId)
-    shards(shardId).insert(partitionId, record)
+    shards(shardId).insert(partitionId, record, metrics)
   }
 
   /**
     * Flush the buffered data into underlying partitioned writer, and then flush the partitioned writer into
     * underlying file system.
     */
-  override def flush(): Unit = {
+  def flush(metrics: ConcurrentCombinerMetrics): Unit = {
     if (!closed) {
-      shards.foreach(_.flush())
-      filesPartitionedWriter.flush()
+      shards.foreach(_.flush(metrics))
+      filesPartitionedWriter.flush(metrics)
     }
   }
 
   /**
     * Flush and close
     */
-  override def close(): Unit = {
+  def close(metrics: ConcurrentCombinerMetrics): Unit = {
     if (!closed) {
-      shards.foreach(_.close())
+      shards.foreach(_.close(metrics))
       filesPartitionedWriter.close()
       shards = null
       filesPartitionedWriter = null

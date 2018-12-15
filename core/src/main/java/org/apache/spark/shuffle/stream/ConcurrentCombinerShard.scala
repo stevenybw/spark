@@ -50,18 +50,24 @@ extends Logging {
     def getBuf(): Array[Byte] = buf
   }
 
-  private def writeElement(partitionId: Int, key: K, combinedValue: C): Unit = {
+  private def writeElement(partitionId: Int, key: K, combinedValue: C, metrics: ConcurrentCombinerMetrics): Unit = {
+    metrics.serializationDuration -= System.nanoTime()
     serBuffer.reset()
     serStream.writeKey(key.asInstanceOf[AnyRef])
     serStream.writeValue(combinedValue.asInstanceOf[AnyRef])
     serStream.flush()
+    metrics.serializationDuration += System.nanoTime()
     val buf = serBuffer.getBuf()
     val size = serBuffer.size()
+    metrics.writeDuration -= System.nanoTime()
     filesPartitionedWriter.append(partitionId, buf, size)
+    metrics.writeDuration += System.nanoTime()
+    metrics.recordsWritten += 1
+    metrics.bytesWritten += size
   }
 
   /** Spill the in-memory map into PartitionedWriter */
-  private def spill(): Unit = {
+  private def spill(metrics: ConcurrentCombinerMetrics): Unit = {
     logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId} start spilling")
     val inMemoryIterator = map.iterator
     while (inMemoryIterator.hasNext) {
@@ -69,7 +75,7 @@ extends Logging {
       val partitionId = record._1._1
       val key = record._1._2
       val combinedValue = record._2
-      writeElement(partitionId, key, combinedValue)
+      writeElement(partitionId, key, combinedValue, metrics)
     }
     logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId} successfully spilled")
   }
@@ -78,13 +84,13 @@ extends Logging {
     * Write a record into this collection. This method is thread-safe.
     * @param record
     */
-  def insert(partitionId: Int, record: Product2[K, V]): Unit = synchronized {
+  def insert(partitionId: Int, record: Product2[K, V], metrics: ConcurrentCombinerMetrics): Unit = synchronized {
     map.changeValue((partitionId, record._1), (hadValue, oldValue) => {
       if (hadValue) mergeValue(oldValue, record._2) else createCombiner(record._2)
     })
     val estimateSize = map.estimateSize()
     if (estimateSize > capacityBytes) {
-      spill()
+      spill(metrics)
       map = new PartitionedAppendOnlyMap[K, C]
     }
   }
@@ -93,10 +99,10 @@ extends Logging {
     * Flush the partitioned append-only map into underlying partitioned writer. But this method will not
     * flush the underlying partitioned writer.
     */
-  def flush(): Unit = {
+  def flush(metrics: ConcurrentCombinerMetrics): Unit = {
     if (!closed) {
       logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId}'s flush is called, start spilling")
-      spill()
+      spill(metrics)
       map = new PartitionedAppendOnlyMap[K, C]
     }
   }
@@ -105,10 +111,10 @@ extends Logging {
     * Flush the partitioned append-only map into underlying partitioned writer, and release the resources of this
     * shard.
     */
-  def close(): Unit = {
+  def close(metrics: ConcurrentCombinerMetrics): Unit = {
     if (!closed) {
       logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId}'s close is called, resources released")
-      spill()
+      spill(metrics)
       map = null
       closed = true
     }

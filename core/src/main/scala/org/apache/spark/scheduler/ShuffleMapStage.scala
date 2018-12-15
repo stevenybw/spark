@@ -68,7 +68,7 @@ private[spark] class ShuffleMapStage(
 
   /** Return true if this stage require flushing */
   def flushRequired: Boolean = {
-    SparkEnv.get.shuffleManager.getFlusher(shuffleDep.shuffleHandle).isDefined
+    SparkEnv.get.shuffleManager.flushRequired(shuffleDep.shuffleHandle)
   }
 
   /**

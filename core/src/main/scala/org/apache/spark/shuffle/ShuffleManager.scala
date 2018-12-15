@@ -50,10 +50,16 @@ private[spark] trait ShuffleManager {
       endPartition: Int,
       context: TaskContext): ShuffleReader[K, C]
 
+  /**
+    * Determine whether the specified shuffle stage require additional flushing. If this returns true,
+    * then getFlusher must return Some[...]
+    */
+  def flushRequired(handle: ShuffleHandle): Boolean
+
   /** Get the optionally flusher
     * The shuffler should provide a ShuffleFlusher if intend to use task merging
     */
-  def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher]
+  def getFlusher(handle: ShuffleHandle, executorId: String, context: TaskContext): Option[ShuffleFlusher]
 
   /**
    * Remove a shuffle's metadata from the ShuffleManager.

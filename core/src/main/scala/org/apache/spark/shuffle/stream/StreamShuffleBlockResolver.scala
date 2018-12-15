@@ -55,7 +55,7 @@ with Logging {
     val mapId = blockId.mapId
     val reducerId = blockId.reduceId
     val dataFile = if (mapId < numMaps) getDataFile(shuffleId, mapId, reducerId) else getMergedDataFile(shuffleId, reducerId, numMaps)
-    logInfo(s"getBlockData (shuffleId = ${shuffleId}  mapId = ${mapId}  reducerId = ${reducerId}  fileSize = ${dataFile.length()}")
+    // logInfo(s"getBlockData (shuffleId = ${shuffleId}  mapId = ${mapId}  reducerId = ${reducerId}  fileSize = ${dataFile.length()}")
     new FileSegmentManagedBuffer(
       transportConf,
       dataFile,

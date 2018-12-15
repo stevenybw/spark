@@ -29,7 +29,7 @@ private[spark] class TaskSet(
     val stageAttemptId: Int,
     val priority: Int,
     val properties: Properties,
-    val mergingContext: Option[MergingContext] = None) {
+    val flushTaskCreaterOpt: Option[FlushTaskCreater] = None) {
   val id: String = stageId + "." + stageAttemptId
 
   override def toString: String = "TaskSet " + id

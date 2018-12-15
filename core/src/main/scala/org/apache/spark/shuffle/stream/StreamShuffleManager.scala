@@ -213,12 +213,13 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           env.blockManager,
           streamShuffleCombinedHandle,
           mapId,
+          context,
           concurrentCombiner)
     }
   }
 
 
-  override def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher] = {
+  override def getFlusher(handle: ShuffleHandle, executorId: String, taskContext: TaskContext): Option[ShuffleFlusher] = {
     val env = SparkEnv.get
     handle match {
       case streamShuffleHandle: StreamShuffleHandle[_, _] =>
@@ -229,7 +230,10 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
         logInfo(s"Shuffle flush task from shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
         Option(new StreamShuffleFlusher(
           env.blockManager,
+          streamShuffleHandle,
           sharedWriter,
+          executorId,
+          taskContext,
           env.conf))
       case streamShuffleDirectHandle: StreamShuffleDirectHandle[_, _, _] =>
         val shuffleId = streamShuffleDirectHandle.shuffleId
@@ -239,7 +243,10 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
         logInfo(s"Shuffle flush task from shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
         Option(new StreamShuffleFlusher(
           env.blockManager,
+          streamShuffleDirectHandle,
           sharedWriter,
+          executorId,
+          taskContext,
           env.conf))
       case streamShuffleCombinedHandle: StreamShuffleCombinedHandle[_, _, _] =>
         val shuffleId = streamShuffleCombinedHandle.shuffleId
@@ -249,11 +256,23 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
         logInfo(s"Shuffle flush task from combined stream shuffle ${shuffleId} called flush")
         Option(new StreamShuffleFlusherCombined(
           env.blockManager,
+          streamShuffleCombinedHandle,
           concurrentCombiner,
+          executorId,
+          taskContext,
           env.conf
         ))
       case streamShuffleWithoutMergingHandle: StreamShuffleWithoutMergingHandle[_, _] =>
         None
+    }
+  }
+
+  override def flushRequired(handle: ShuffleHandle): Boolean = {
+    handle match {
+      case streamShuffleHandle: StreamShuffleHandle[_, _] => true
+      case streamShuffleDirectHandle: StreamShuffleDirectHandle[_, _, _] => true
+      case streamShuffleCombinedHandle: StreamShuffleCombinedHandle[_, _, _] => true
+      case streamShuffleWithoutMergingHandle: StreamShuffleWithoutMergingHandle[_, _] => false
     }
   }
 
@@ -283,6 +302,7 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
   override def stop(): Unit = {
     shuffleBlockResolver.stop()
   }
+
 }
 
 private[spark] class StreamShuffleHandle[K, V](shuffleId: Int,

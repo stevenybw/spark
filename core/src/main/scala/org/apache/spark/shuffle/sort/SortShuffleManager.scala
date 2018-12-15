@@ -169,7 +169,9 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
   }
 
   /** Get a flusher */
-  override def getFlusher(handle: ShuffleHandle): Option[ShuffleFlusher] = None
+  override def getFlusher(handle: ShuffleHandle, executorId: String, context: TaskContext): Option[ShuffleFlusher] = None
+
+  override def flushRequired(handle: ShuffleHandle): Boolean = false
 }
 
 

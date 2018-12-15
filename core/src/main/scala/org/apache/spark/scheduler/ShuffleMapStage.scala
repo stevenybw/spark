@@ -46,6 +46,7 @@ private[spark] class ShuffleMapStage(
     mapOutputTrackerMaster: MapOutputTrackerMaster)
   extends Stage(id, rdd, numTasks, parents, firstJobId, callSite) {
 
+
   private[this] var _isDraining = false
   private[this] var _mapStageJobs: List[ActiveJob] = Nil
 
@@ -61,7 +62,47 @@ private[spark] class ShuffleMapStage(
   val pendingPartitions = new HashSet[Int]
 
   /** Shuffle flush tasks expected (host, execId) */
-  val pendingShuffleFlushTasks = new HashSet[(String, String)]
+  // val pendingShuffleFlushTasks = new HashSet[(String, String)]
+
+  /** Expected ShuffleFlushTasks (hostId, execId) to a set of taskIndex */
+  // val pendingFlushTasks = new mutable.HashMap[(String, String), mutable.Set[Int]]()
+
+  /**
+    * How many ShuffleFlushTask to launch for each executor.
+    *
+    * Warning: Be aware to stay synchronized with the number of shards of
+    * [[org.apache.spark.shuffle.stream.ConcurrentCombiner]]. This is about correctness, not performance.
+    */
+  val numFlushTasksPerExecutor: Int = 1<<rdd.conf.getInt("spark.shuffle.stream.combine.numShardsPO2", 4)
+
+  /** Expected ShuffleFlushTasks index */
+  val pendingFlushTasks = new mutable.HashSet[Int]()
+  val allFlushTasks = new mutable.HashSet[Int]()
+
+  def numFlushTasks: Int = allFlushTasks.size
+
+  /** Convert executorId: String to continguous integer (For now just convert to integer directly */
+  def convertExecutorId(executorId: String): Int = executorId.toInt
+
+  /** Get task index from executorId and flusherId pair */
+  def taskIndexFromExecutorIdAndFlusherId(executorId: String, flusherId: Int): Int = {
+    convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
+  }
+
+  /** Add a new executor for flush tasks */
+  def addExecutorForFlushing(host: String, executorId: String): Unit = {
+    for (i <- 0 until numFlushTasksPerExecutor) {
+      // Pass global task id ( a task is a flush task if task id >= numTasks )
+      val taskId = numTasks + taskIndexFromExecutorIdAndFlusherId(executorId, i)
+      pendingFlushTasks.add(taskId)
+      allFlushTasks.add(taskId)
+    }
+  }
+
+  /** Complete a ShuffleMapTask */
+  def completeShuffleMapTask(taskIndex: Int): Unit = {
+    pendingFlushTasks.remove(taskIndex)
+  }
 
   /** When all the pending partitions have finished, the stage enters into draining state */
   def isDraining: Boolean = _isDraining
@@ -83,7 +124,7 @@ private[spark] class ShuffleMapStage(
       .mapStatuses
       .map(m => (m.location.host, m.location.executorId))
       .distinct
-      .foreach(t => pendingShuffleFlushTasks.add(t))
+      .foreach(t => addExecutorForFlushing(t._1, t._2))
   }
 
   override def toString: String = "ShuffleMapStage " + id

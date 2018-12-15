@@ -768,25 +768,72 @@ private[spark] class TaskSetManager(
 
 
   /** Mapping from executor id to pending flush task id */
-  val shuffleFlushTaskIdForExecutor = new mutable.HashMap[(String, String), Int]()
-  val shuffleFlushTasks = new mutable.HashMap[Int, ShuffleFlushTask]()
-  val pendingFlushExecutors = new mutable.HashSet[(String, String)]()
+  // val shuffleFlushTaskIdForExecutor = new mutable.HashMap[(String, String), Int]()
+  // val pendingFlushExecutors = new mutable.HashSet[(String, String)]()
+
+  /** Keep track on the task index of successful shuffle flush tasks */
   val successfulShuffleFlushTasks = new mutable.HashSet[Int]()
+
+  /** Mapping from flush task id to the ShuffleFlushTask */
+  val shuffleFlushTasks = new mutable.HashMap[Int, ShuffleFlushTask]()
+
+  /** Pending ShuffleFlushTasks (hostId, execId) to a queue of (taskIndex, task) */
+  val pendingFlushTasks = new mutable.HashMap[(String, String), mutable.Queue[(Int, ShuffleFlushTask)]]()
+
+  /**
+    * How many ShuffleFlushTask to launch for each executor.
+    *
+    * Warning: Be aware to stay synchronized with the number of shards of
+    * [[org.apache.spark.shuffle.stream.ConcurrentCombiner]]. This is about correctness, not performance.
+    */
+  val numFlushTasksPerExecutor: Int = 1<<conf.getInt("spark.shuffle.stream.combine.numShardsPO2", 4)
+
+  /** Add a new executor for flush tasks */
+  def addExecutorForFlushing(flushTaskCreater: FlushTaskCreater, host: String, executorId: String): Unit = {
+    val taskQueue = new mutable.Queue[(Int, ShuffleFlushTask)]()
+    for (i <- 0 until numFlushTasksPerExecutor) {
+      // Pass global task id ( a task is a flush task if task id >= numTasks )
+      val taskId = numTasks + taskIndexFromExecutorIdAndFlusherId(executorId, i)
+      val task = flushTaskCreater.createFlushTask(host, executorId, taskId)
+      shuffleFlushTasks.put(taskId, task)
+      taskQueue.enqueue((taskId, task))
+    }
+    pendingFlushTasks.put((host, executorId), taskQueue)
+  }
+
+  /** Convert executorId: String to continguous integer (For now just convert to integer directly */
+  def convertExecutorId(executorId: String): Int = executorId.toInt
+
+  /** Get task index from executorId and flusherId pair */
+  def taskIndexFromExecutorIdAndFlusherId(executorId: String, flusherId: Int): Int = {
+    convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
+  }
 
   /** Try to fetch a shuffle flush task given specified executorId and hostId */
   def popShuffleFlushTask(execId: String, host: String): Option[(Int, ShuffleFlushTask)] = {
-    if (pendingFlushExecutors.contains((host, execId))) {
-      pendingFlushExecutors.remove((host, execId))
-      val index = shuffleFlushTaskIdForExecutor((host, execId))
-      val task = shuffleFlushTasks(index)
-      Option((index, task))
+    val taskQueue = pendingFlushTasks((host, execId))
+    if (taskQueue.nonEmpty) {
+      Some(taskQueue.dequeue())
     } else {
       None
     }
   }
 
+  /** Try to fetch a shuffle flush task given specified executorId and hostId */
+//  def popShuffleFlushTask(execId: String, host: String): Option[(Int, ShuffleFlushTask)] = {
+//    if (pendingFlushExecutors.contains((host, execId))) {
+//      pendingFlushExecutors.remove((host, execId))
+//      val index = shuffleFlushTaskIdForExecutor((host, execId))
+//      val task = shuffleFlushTasks(index)
+//      Option((index, task))
+//    } else {
+//      None
+//    }
+//  }
+
   def isShuffleFlushTask(i: Int): Boolean = i>=numTasks
 
+  /** (Host, Executor) involved in this TaskSet */
   val involvedHostExecutors = new mutable.HashSet[(String, String)]()
 
   /**
@@ -819,11 +866,12 @@ private[spark] class TaskSetManager(
         logInfo(s"Stage ${taskSet.stageId} involves ${distinctHostExecutors.length} distinct (host,executor), and ${distinctExecutors.length} distinct (executor)")
         for ((host, executorId) <- distinctHostExecutors) {
           // Pass global task id ( a flush task if task id >= numTasks )
-          val taskId = numTasks + shuffleFlushTasks.size
-          val task = flushTaskCreater.createFlushTask(host, executorId, taskId)
-          shuffleFlushTaskIdForExecutor.put((host, executorId), taskId)
-          shuffleFlushTasks.put(taskId, task)
-          pendingFlushExecutors.add((host, executorId))
+          addExecutorForFlushing(flushTaskCreater, host, executorId)
+//          val taskId = numTasks + shuffleFlushTasks.size
+//          val task = flushTaskCreater.createFlushTask(host, executorId, taskId)
+//          shuffleFlushTaskIdForExecutor.put((host, executorId), taskId)
+//          shuffleFlushTasks.put(taskId, task)
+//          pendingFlushExecutors.add((host, executorId))
         }
       case None =>
         isZombie = true
@@ -1147,7 +1195,7 @@ private[spark] class TaskSetManager(
    *
    */
   private def computeValidLocalityLevels(): Array[TaskLocality.TaskLocality] = {
-    import TaskLocality._
+    import TaskLocality.{PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY}
     val levels = new ArrayBuffer[TaskLocality.TaskLocality]
     if (!pendingTasksForExecutor.isEmpty &&
         pendingTasksForExecutor.keySet.exists(sched.isExecutorAlive(_))) {

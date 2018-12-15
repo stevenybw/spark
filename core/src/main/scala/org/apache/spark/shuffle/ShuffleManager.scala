@@ -59,7 +59,7 @@ private[spark] trait ShuffleManager {
   /** Get the optionally flusher
     * The shuffler should provide a ShuffleFlusher if intend to use task merging
     */
-  def getFlusher(handle: ShuffleHandle, executorId: String, context: TaskContext): Option[ShuffleFlusher]
+  def getFlusher(handle: ShuffleHandle, taskId: Int, context: TaskContext): Option[ShuffleFlusher]
 
   /**
    * Remove a shuffle's metadata from the ShuffleManager.

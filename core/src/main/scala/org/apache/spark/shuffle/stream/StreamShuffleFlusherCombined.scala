@@ -14,7 +14,8 @@ import org.apache.spark.storage.BlockManager
 class StreamShuffleFlusherCombined(blockManager: BlockManager,
                                    handle: BaseShuffleHandle[_, _, _],
                                    concurrentCombiner: ConcurrentCombiner[_, _, _],
-                                   executorId: String,
+                                   taskId: Int,
+                                   flusherId: Int,
                                    taskContext: TaskContext,
                                    conf: SparkConf)
   extends ShuffleFlusher with Logging {
@@ -22,11 +23,11 @@ class StreamShuffleFlusherCombined(blockManager: BlockManager,
   override def flush(): MapStatus = {
     var taskDuration = -System.nanoTime()
     val concurrentCombinerMetrics = new ConcurrentCombinerMetrics
-    concurrentCombiner.flush(concurrentCombinerMetrics)
-    val partitionLengths = concurrentCombiner.filesPartitionedWriter.getPartitionLengths()
-    concurrentCombiner.close(concurrentCombinerMetrics)
+    concurrentCombiner.flush(concurrentCombinerMetrics, flusherId)
+    val partitionLengths = concurrentCombiner.filesPartitionedWriter.getPartitionLengths(flusherId)
+    concurrentCombiner.close(concurrentCombinerMetrics, flusherId)
     taskDuration += System.nanoTime()
-    logInfo("YPerformanceMetric  flush," + executorId +
+    logInfo("YPerformanceMetric  flush," + taskId +
       "," + handle.dependency.shuffleId +
       "," + concurrentCombinerMetrics.recordsWritten +
       "," + concurrentCombinerMetrics.bytesWritten +

@@ -8,6 +8,8 @@ import org.apache.spark.{Aggregator, Partitioner, ShuffleDependency}
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.Serializer
 
+import scala.collection.mutable
+
 /**
   * A [[ConcurrentCombiner]] performs partial aggregation without sorting and spills in-memory data to a [[FilesPartitionedWriter]].
   * A [[ConcurrentCombiner]] is composed of multiple [[ConcurrentCombinerShard]] (which is specified by numParallelism). We assign
@@ -35,6 +37,7 @@ class ConcurrentCombiner[K, V, C](shuffleId: Int,
 extends Logging {
   private var closed = false
   private val numShards = 1<<numShardsPowerOfTwo
+  private val closedShards = new mutable.HashSet[Int]()
 
   private def partitionIdFromLocalId(localId: Int, shardId: Int): Int = (localId<<numShardsPowerOfTwo) + shardId
 
@@ -52,7 +55,7 @@ extends Logging {
     aggregator,
     serializer,
     filesPartitionedWriter
-  ))
+  )).toArray
 
   /**
     * Write a record into this collection. This method is thread-safe.
@@ -68,23 +71,27 @@ extends Logging {
     * Flush the buffered data into underlying partitioned writer, and then flush the partitioned writer into
     * underlying file system.
     */
-  def flush(metrics: ConcurrentCombinerMetrics): Unit = {
-    if (!closed) {
-      shards.foreach(_.flush(metrics))
-      filesPartitionedWriter.flush(metrics)
+  def flush(metrics: ConcurrentCombinerMetrics, shardId: Int): Unit = {
+    if (!closedShards.contains(shardId)) {
+      shards(shardId).flush(metrics)
+      filesPartitionedWriter.flush(metrics, shardId)
     }
   }
 
   /**
     * Flush and close
     */
-  def close(metrics: ConcurrentCombinerMetrics): Unit = {
-    if (!closed) {
-      shards.foreach(_.close(metrics))
-      filesPartitionedWriter.close()
-      shards = null
-      filesPartitionedWriter = null
-      closed = true
+  def close(metrics: ConcurrentCombinerMetrics, shardId: Int): Unit = {
+    if (!closedShards.contains(shardId)) {
+      shards(shardId).close(metrics)
+      shards(shardId) = null
+      filesPartitionedWriter.close(shardId)
+      closedShards.add(shardId)
+      if (closedShards.size == numShards) {
+        shards = null
+        filesPartitionedWriter = null
+        closed = true
+      }
     }
   }
 }

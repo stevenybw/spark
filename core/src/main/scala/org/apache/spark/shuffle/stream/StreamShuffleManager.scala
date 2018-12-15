@@ -54,12 +54,17 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
   *   map-side combining is required by a shuffle dependency, we just convert the values to combiners without any actual
   *   combining. In the future, we will add support for executor-side combining.
   *
+  *  WARNING: We use round-robin shard for both the [[FilesPartitionedWriter]] and [[ConcurrentCombiner]], shard id is
+  *  partition id modular num shards, which is specified in config spark.shuffle.stream.combine.numShardsPO2. This is
+  *  about correctness.
+  *
   * @param conf
   */
 private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {
   private val fileBufferBytes = conf.getSizeAsKb("spark.shuffle.file.buffer", "32k").toInt * 1024
   private val shuffleMethod = conf.get("spark.shuffle.stream.method", "unmerged_direct")
   private val numShardsPowerOfTwo = conf.getInt("spark.shuffle.stream.combine.numShardsPO2", 4)
+  private val numShards = 1<<numShardsPowerOfTwo
   private val totalCombinerMemoryCapacity = conf.getSizeAsKb("spark.shuffle.stream.combine.menCapacity", "1g") * 1024
   // Very strange that this should be set in getWriter, not in registerShuffle, strange. Who is calling registerShuffle?
   private[stream] val numMapsForShuffle = new ConcurrentHashMap[Int, Int]()
@@ -136,6 +141,7 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
             shuffleId,
             numMaps,
             numPartitions,
+            numShards,
             shuffleBlockResolver,
             fileBufferBytes))
         logInfo(s"Task ${mapId} from batched shuffle ${shuffleId} get the shared writer from SharedObjectManager: ${objid}")
@@ -169,6 +175,7 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           shuffleId,
           numMaps,
           numPartitions,
+          numShards,
           shuffleBlockResolver,
           fileBufferBytes))
         if (mapSideCombine) {
@@ -199,13 +206,14 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
             shuffleId,
             numMaps,
             numPartitions,
+            numShards,
             shuffleBlockResolver,
             fileBufferBytes)
           new ConcurrentCombiner(shuffleId,
             numShardsPowerOfTwo,
             totalCombinerMemoryCapacity,
             streamShuffleCombinedHandle.dependency.partitioner,
-            streamShuffleCombinedHandle.dependency.aggregator.get,
+            streamShuffleCombinedHandle.dependency.aggregator.get, // do not use it, not thread safe
             streamShuffleCombinedHandle.dependency.serializer,
             filesPartitionedWriter)
         })
@@ -219,7 +227,7 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
   }
 
 
-  override def getFlusher(handle: ShuffleHandle, executorId: String, taskContext: TaskContext): Option[ShuffleFlusher] = {
+  override def getFlusher(handle: ShuffleHandle, taskId: Int, taskContext: TaskContext): Option[ShuffleFlusher] = {
     val env = SparkEnv.get
     handle match {
       case streamShuffleHandle: StreamShuffleHandle[_, _] =>
@@ -232,7 +240,8 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           env.blockManager,
           streamShuffleHandle,
           sharedWriter,
-          executorId,
+          taskId,
+          taskId % numShards,
           taskContext,
           env.conf))
       case streamShuffleDirectHandle: StreamShuffleDirectHandle[_, _, _] =>
@@ -245,7 +254,8 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           env.blockManager,
           streamShuffleDirectHandle,
           sharedWriter,
-          executorId,
+          taskId,
+          taskId % numShards,
           taskContext,
           env.conf))
       case streamShuffleCombinedHandle: StreamShuffleCombinedHandle[_, _, _] =>
@@ -258,7 +268,8 @@ private[spark] class StreamShuffleManager(conf: SparkConf) extends ShuffleManage
           env.blockManager,
           streamShuffleCombinedHandle,
           concurrentCombiner,
-          executorId,
+          taskId,
+          taskId % numShards,
           taskContext,
           env.conf
         ))

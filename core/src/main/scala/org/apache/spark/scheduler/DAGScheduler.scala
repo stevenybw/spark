@@ -1348,7 +1348,7 @@ class DAGScheduler(
               } else {
                 shuffleStage.startDraining()
                 logInfo(s"the last shuffle map task has finished, stage ${shuffleStage.id} " +
-                  s"enters draining with ${shuffleStage.pendingShuffleFlushTasks.size} pending shuffle flush tasks.")
+                  s"enters draining with ${shuffleStage.numFlushTasks} pending shuffle flush tasks.")
               }
             }
           case sft: ShuffleFlushTask =>
@@ -1359,12 +1359,12 @@ class DAGScheduler(
             logInfo(s"ShuffleFlushTask finished on ${execId}")
             require(shuffleStage.isDraining)
             require(stageIdToStage(task.stageId).latestInfo.attemptNumber() == task.stageAttemptId, "stage attempt id mismatch")
-            shuffleStage.pendingShuffleFlushTasks.remove(hostExecId)
+            shuffleStage.completeShuffleMapTask(sft.taskId)
             require(!(failedEpoch.contains(execId) && sft.epoch <= failedEpoch(execId)), "failed scenario to do in the future")
             mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId, sft.partitionId, status)
             // shuffleStage.pendingFlushTask -= task.partitionId
             require(runningStages.contains(shuffleStage), "a shuffle flush task to not running stage detected")
-            if (runningStages.contains(shuffleStage) && shuffleStage.pendingShuffleFlushTasks.isEmpty) {
+            if (runningStages.contains(shuffleStage) && shuffleStage.pendingFlushTasks.isEmpty) {
               logInfo(s"the last shuffle flush task has finished, stage ${shuffleStage.id} finished")
               markStageAsFinished(shuffleStage)
               logInfo("looking for newly runnable stages")

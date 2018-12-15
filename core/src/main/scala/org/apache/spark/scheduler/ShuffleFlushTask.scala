@@ -22,7 +22,7 @@ private[spark] class ShuffleFlushTask(
     stageId: Int,
     stageAttemptId: Int,
     taskBinary: Broadcast[Array[Byte]],
-    taskId: Int,
+    val taskId: Int,
     @transient private var locs: Seq[TaskLocation],
     localProperties: Properties,
     serializedTaskMetrics: Array[Byte],
@@ -55,7 +55,7 @@ private[spark] class ShuffleFlushTask(
 
     var flusher: ShuffleFlusher = null
     val manager = SparkEnv.get.shuffleManager
-    flusher = manager.getFlusher(dep.shuffleHandle, executorId, context).get
+    flusher = manager.getFlusher(dep.shuffleHandle, taskId, context).get
     flusher.flush()
   }
 }

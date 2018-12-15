@@ -29,7 +29,7 @@ extends ShuffleWriter[K, V] with Logging {
     var numRecords = 0L
     while (records.hasNext) {
       val record = records.next()
-      concurrentCombiner.insert(record, concurrentCombinerMetrics)
+      concurrentCombiner.insert(record, concurrentCombinerMetrics, handle.dependency.aggregator.get)
       numRecords += 1
     }
     taskDuration += System.nanoTime()

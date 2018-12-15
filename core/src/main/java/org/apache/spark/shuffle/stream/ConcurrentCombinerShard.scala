@@ -29,13 +29,13 @@ class ConcurrentCombinerShard[K, V, C](shuffleId: Int,
                                        shardId: Int,
                                        numShardsPowerOfTwo: Int,
                                        capacityBytes: Long,
-                                       aggregator: Aggregator[K, V, C],
+                                       _aggregator_do_not_use: Aggregator[K, V, C],
                                        serializer: Serializer,
                                        filesPartitionedWriter: FilesPartitionedWriter)
 extends Logging {
   private var closed = false
-  private val mergeValue: (C, V) => C = aggregator.mergeValue
-  private val createCombiner: V => C = aggregator.createCombiner
+  // private val mergeValue: (C, V) => C = aggregator.mergeValue
+  // private val createCombiner: V => C = aggregator.createCombiner
   // private var kv: Product2[K, V] = null
   // private val update = (hadValue: Boolean, oldValue: C) => {
   //   if (hadValue) mergeValue(oldValue, kv._2) else createCombiner(kv._2)
@@ -84,7 +84,9 @@ extends Logging {
     * Write a record into this collection. This method is thread-safe.
     * @param record
     */
-  def insert(partitionId: Int, record: Product2[K, V], metrics: ConcurrentCombinerMetrics): Unit = synchronized {
+  def insert(partitionId: Int, record: Product2[K, V], metrics: ConcurrentCombinerMetrics, aggregator: Aggregator[K, V, C]): Unit = synchronized {
+    val createCombiner = aggregator.createCombiner
+    val mergeValue = aggregator.mergeValue
     map.changeValue((partitionId, record._1), (hadValue, oldValue) => {
       if (hadValue) mergeValue(oldValue, record._2) else createCombiner(record._2)
     })

@@ -14,6 +14,9 @@ import org.apache.spark.serializer.Serializer
   * the incoming records to shards in a round-robin fashion. E.g., to insert a record of partition i, we assign the record to i%numParallelism.
   * Modular is very slow. To optimize the performance, we require numParallelism to be a power of two.
   *
+  * WARNING: The aggregator is not thread safe because a [[org.apache.spark.serializer.SerializerInstance]] may be cached
+  * inside like operations such as foldByKey. We have to accept aggregator from function argument.
+  *
   * @param shuffleId the shuffle id of this ShuffleMapStage
   * @param numShardsPowerOfTwo total number of shards in this stage
   * @param totalMemoryCapacity memory capacity this combiner is allowed to use
@@ -55,10 +58,10 @@ extends Logging {
     * Write a record into this collection. This method is thread-safe.
     * @param record
     */
-  def insert(record: Product2[K, V], metrics: ConcurrentCombinerMetrics): Unit = {
+  def insert(record: Product2[K, V], metrics: ConcurrentCombinerMetrics, aggregator: Aggregator[K, V, C]): Unit = {
     val partitionId = partitioner.getPartition(record._1)
     val shardId = shardIdFromPartitionId(partitionId)
-    shards(shardId).insert(partitionId, record, metrics)
+    shards(shardId).insert(partitionId, record, metrics, aggregator)
   }
 
   /**

@@ -10,9 +10,9 @@ import java.nio.channels.FileChannel
 import org.apache.spark.internal.Logging
 
 /**
-  * Shared writer is a lazy-initialized collection of buffered file output streams.
+  *
   */
-private[spark] class SharedWriter(
+private[spark] class FilesPartitionedWriter (
   shuffleId: Int,
   numMaps: Int,
   numPartitions: Int,

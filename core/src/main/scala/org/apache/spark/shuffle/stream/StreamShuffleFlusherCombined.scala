@@ -4,16 +4,16 @@
 
 package org.apache.spark.shuffle.stream
 
-import org.apache.spark.{SparkConf}
+import org.apache.spark.SparkConf
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.ShuffleFlusher
 import org.apache.spark.storage.BlockManager
 
-class StreamShuffleFlusher(blockManager: BlockManager, sharedWriter: FilesPartitionedWriter, conf: SparkConf) extends ShuffleFlusher {
+class StreamShuffleFlusherCombined(blockManager: BlockManager, concurrentCombiner: ConcurrentCombiner[_, _, _], conf: SparkConf) extends ShuffleFlusher {
   override def flush(): MapStatus = {
-    sharedWriter.flush()
-    val partitionLengths = sharedWriter.getPartitionLengths()
-    sharedWriter.close()
+    concurrentCombiner.flush()
+    val partitionLengths = concurrentCombiner.filesPartitionedWriter.getPartitionLengths()
+    concurrentCombiner.close()
     MapStatus(blockManager.shuffleServerId, partitionLengths)
   }
 }

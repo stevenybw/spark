@@ -83,7 +83,7 @@ public class StreamShuffleWriter<K, V> extends ShuffleWriter<K, V> {
           int mapId,
           TaskContext taskContext,
           SparkConf sparkConf,
-          SharedWriter sharedWriter) throws IOException {
+          FilesPartitionedWriter filesPartitionedWriter) throws IOException {
     final ShuffleDependency<K, V, V> dep = handle.dependency();
     this.numPartitions = dep.partitioner().numPartitions();
     this.blockManager = blockManager;
@@ -95,7 +95,7 @@ public class StreamShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     this.serBuffer = new BufExposedByteArrayOutputStream(DEFAULT_INIT_SER_BUFFER_SIZE);
     this.serOutputStream = serializerInstance.serializeStream(serBuffer);
     this.shuffleWriterBackend = new StreamedShuffleWriterBackend(numPartitions,
-            sharedWriter.getBufferedOutputStreams(),
+            filesPartitionedWriter.getBufferedOutputStreams(),
             1024*1024,
             1024*1024);
   }

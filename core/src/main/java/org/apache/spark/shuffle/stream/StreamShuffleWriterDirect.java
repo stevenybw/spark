@@ -8,10 +8,7 @@
 
 package org.apache.spark.shuffle.stream;
 
-import org.apache.spark.Partitioner;
-import org.apache.spark.ShuffleDependency;
-import org.apache.spark.SparkConf;
-import org.apache.spark.TaskContext;
+import org.apache.spark.*;
 import org.apache.spark.scheduler.MapStatus;
 import org.apache.spark.scheduler.MapStatus$;
 import org.apache.spark.serializer.SerializationStream;
@@ -19,9 +16,9 @@ import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.serializer.SerializerManager;
 import org.apache.spark.shuffle.ShuffleWriter;
 import org.apache.spark.storage.BlockManager;
-import org.apache.spark.storage.ShuffleBlockId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Function1;
 import scala.None$;
 import scala.Option;
 import scala.Product2;
@@ -37,16 +34,19 @@ import java.io.*;
  * @param <K>
  * @param <V>
  */
-public class StreamShuffleWriterDirect<K, V> extends ShuffleWriter<K, V> {
+public class StreamShuffleWriterDirect<K, V, C> extends ShuffleWriter<K, V> {
   private static final Logger logger = LoggerFactory.getLogger(StreamShuffleWriterDirect.class);
 
   private static final ClassTag<Object> keyClassTag = ClassTag$.MODULE$.Object();
   private static final ClassTag<Object> valueClassTag = ClassTag$.MODULE$.Object();
+  private static final ClassTag<Object> combinerClassTag = ClassTag$.MODULE$.Object();
   private boolean stopped = false;
   private BlockManager blockManager;
   private Partitioner partitioner;
+  private boolean mapSideCombine;
+  private final Option<Aggregator<K, V, C>> aggregatorOpt;
   private int mapId;
-  private SharedWriter sharedWriter;
+  private FilesPartitionedWriter filesPartitionedWriter;
   private BufExposedByteArrayOutputStream serBuf;
   private SerializationStream serStream;
 
@@ -58,19 +58,21 @@ public class StreamShuffleWriterDirect<K, V> extends ShuffleWriter<K, V> {
   StreamShuffleWriterDirect(
           BlockManager blockManager,
           StreamShuffleBlockResolver streamShuffleBlockResolver,
-          StreamShuffleDirectHandle<K, V> handle,
+          StreamShuffleDirectHandle<K, V, C> handle,
           int mapId,
           TaskContext taskContext,
-          SharedWriter sharedWriter,
+          FilesPartitionedWriter filesPartitionedWriter,
           SparkConf conf) throws IOException {
     // Use getSizeAsKb (not bytes) to maintain backwards compatibility if no units are provided
-    ShuffleDependency<K, V, V> dep = handle.dependency();
+    ShuffleDependency<K, V, C> dep = handle.dependency();
     this.blockManager = blockManager;
     SerializerManager serializerManager = blockManager.serializerManager();
     SerializerInstance serializerInstance = dep.serializer().newInstance();
     this.partitioner = dep.partitioner();
+    this.mapSideCombine = dep.mapSideCombine();
+    this.aggregatorOpt = dep.aggregator();
     this.mapId = mapId;
-    this.sharedWriter = sharedWriter;
+    this.filesPartitionedWriter = filesPartitionedWriter;
     this.serBuf = new BufExposedByteArrayOutputStream(4096);
     this.serStream = serializerInstance.serializeStream(serBuf);
   }
@@ -78,19 +80,37 @@ public class StreamShuffleWriterDirect<K, V> extends ShuffleWriter<K, V> {
   @Override
   public void write(Iterator<Product2<K, V>> records) throws IOException {
     long numRecords = 0;
-    while (records.hasNext()) {
-      final Product2<K, V> record = records.next();
-      final int pid = partitioner.getPartition(record._1());
-      serBuf.reset();
-      serStream.writeKey(record._1(), keyClassTag);
-      serStream.writeValue(record._2(), valueClassTag);
-      serStream.flush();
-      int size = serBuf.size();
-      byte[] buf = serBuf.getBuf();
-      sharedWriter.append(pid, buf, size);
-      numRecords++;
+    if (!mapSideCombine) {
+      while (records.hasNext()) {
+        final Product2<K, V> record = records.next();
+        final int pid = partitioner.getPartition(record._1());
+        serBuf.reset();
+        serStream.writeKey(record._1(), keyClassTag);
+        serStream.writeValue(record._2(), valueClassTag);
+        serStream.flush();
+        int size = serBuf.size();
+        byte[] buf = serBuf.getBuf();
+        filesPartitionedWriter.append(pid, buf, size);
+        numRecords++;
+      }
+      logger.info("Map " + mapId + "  NumRecords " + numRecords);
+    } else {
+      Aggregator<K, V, C> aggregator = this.aggregatorOpt.get();
+      Function1<V, C> createCombiner = aggregator.createCombiner();
+      while (records.hasNext()) {
+        final Product2<K, V> record = records.next();
+        final int pid = partitioner.getPartition(record._1());
+        serBuf.reset();
+        serStream.writeKey(record._1(), keyClassTag);
+        serStream.writeValue(createCombiner.apply(record._2()), combinerClassTag);
+        serStream.flush();
+        int size = serBuf.size();
+        byte[] buf = serBuf.getBuf();
+        filesPartitionedWriter.append(pid, buf, size);
+        numRecords++;
+      }
+      logger.info("Map " + mapId + "  NumRecords " + numRecords + " With Map-side Combining");
     }
-    logger.info("Map " + mapId + "  NumRecords " + numRecords);
   }
 
   @Override

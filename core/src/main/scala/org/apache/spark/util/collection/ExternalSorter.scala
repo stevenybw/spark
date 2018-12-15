@@ -196,6 +196,7 @@ private[spark] class ExternalSorter[K, V, C](
       }
     } else {
       // Stick values into our buffer
+      logInfo(s"stage ${context.stageId()} task ${context.partitionId()} use ExternalSorter without map-side combine")
       while (records.hasNext) {
         addElementsRead()
         val kv = records.next()
@@ -215,11 +216,13 @@ private[spark] class ExternalSorter[K, V, C](
     if (usingMap) {
       estimatedSize = map.estimateSize()
       if (maybeSpill(map, estimatedSize)) {
+        logInfo(s"stage ${context.stageId()} task ${context.partitionId()} map collection spilled when the estimated collection size is ${estimatedSize}")
         map = new PartitionedAppendOnlyMap[K, C]
       }
     } else {
       estimatedSize = buffer.estimateSize()
       if (maybeSpill(buffer, estimatedSize)) {
+        logInfo(s"stage ${context.stageId()} task ${context.partitionId()} buffer collection spilled when the estimated collection size is ${estimatedSize}")
         buffer = new PartitionedPairBuffer[K, C]
       }
     }
@@ -236,9 +239,11 @@ private[spark] class ExternalSorter[K, V, C](
    * @param collection whichever collection we're using (map or buffer)
    */
   override protected[this] def spill(collection: WritablePartitionedPairCollection[K, C]): Unit = {
+    logInfo(s"stage ${context.stageId()} partition ${context.partitionId()} called spill")
     val inMemoryIterator = collection.destructiveSortedWritablePartitionedIterator(comparator)
     val spillFile = spillMemoryIteratorToDisk(inMemoryIterator)
     spills += spillFile
+    logInfo(s"stage ${context.stageId()} partition ${context.partitionId()} successfully written to a new spill file ${spillFile.file.getAbsolutePath}")
   }
 
   /**
@@ -246,6 +251,7 @@ private[spark] class ExternalSorter[K, V, C](
    * It will be called by TaskMemoryManager when there is not enough memory for the task.
    */
   override protected[this] def forceSpill(): Boolean = {
+    logInfo(s"stage ${context.stageId()} partition ${context.partitionId()} forceSpill is called")
     if (isShuffleSort) {
       false
     } else {

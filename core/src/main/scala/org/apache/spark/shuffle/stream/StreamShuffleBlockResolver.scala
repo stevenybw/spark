@@ -36,6 +36,7 @@ with Logging {
     ShuffleBlockId(shuffleId, numMaps, reducerId)
   }
 
+  /** The merged data file is a special map output file that belong to the flush task */
   def getMergedDataFile(shuffleId: Int, reducerId: Int, numMaps: Int) = {
     blockManager.diskBlockManager.getFile(getMergedDataBlock(shuffleId, reducerId, numMaps))
   }

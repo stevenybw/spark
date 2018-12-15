@@ -19,6 +19,7 @@ package org.apache.spark.util.collection
 
 import java.util.Comparator
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.unsafe.array.ByteArrayMethods
 import org.apache.spark.util.collection.WritablePartitionedPairCollection._
@@ -30,7 +31,7 @@ import org.apache.spark.util.collection.WritablePartitionedPairCollection._
  * The buffer can support up to 1073741819 elements.
  */
 private[spark] class PartitionedPairBuffer[K, V](initialCapacity: Int = 64)
-  extends WritablePartitionedPairCollection[K, V] with SizeTracker
+  extends WritablePartitionedPairCollection[K, V] with SizeTracker with Logging
 {
   import PartitionedPairBuffer._
 
@@ -47,6 +48,7 @@ private[spark] class PartitionedPairBuffer[K, V](initialCapacity: Int = 64)
   /** Add an element into the buffer */
   def insert(partition: Int, key: K, value: V): Unit = {
     if (curSize == capacity) {
+      logInfo(s"PartitionedPairBuffer capacity grow (current capacity = ${capacity})")
       growArray()
     }
     data(2 * curSize) = (partition, key.asInstanceOf[AnyRef])

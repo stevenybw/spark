@@ -129,7 +129,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
     val env = SparkEnv.get
     handle match {
       case unsafeShuffleHandle: SerializedShuffleHandle[K @unchecked, V @unchecked] =>
-        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${unsafeShuffleHandle.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} uses UnsafeShuffleWriter as shuffle writer")
         new UnsafeShuffleWriter(
           env.blockManager,
           shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver],
@@ -139,7 +139,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
           context,
           env.conf)
       case bypassMergeSortHandle: BypassMergeSortShuffleHandle[K @unchecked, V @unchecked] =>
-        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${bypassMergeSortHandle.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} uses BypassMergeSortShuffleWriter as shuffle writer")
         new BypassMergeSortShuffleWriter(
           env.blockManager,
           shuffleBlockResolver.asInstanceOf[IndexShuffleBlockResolver],
@@ -148,7 +148,7 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
           context,
           env.conf)
       case other: BaseShuffleHandle[K @unchecked, V @unchecked, _] =>
-        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} (${other.dependency.rdd.toString}) uses UnsafeShuffleWriter as shuffle writer")
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} uses SortShuffleWriter as shuffle writer")
         new SortShuffleWriter(shuffleBlockResolver, other, mapId, context)
     }
   }
@@ -194,9 +194,9 @@ private[spark] object SortShuffleManager extends Logging {
       log.debug(s"Can't use serialized shuffle for shuffle $shufId because the serializer, " +
         s"${dependency.serializer.getClass.getName}, does not support object relocation")
       false
-    } else if (dependency.aggregator.isDefined) {
+    } else if (dependency.mapSideCombine) {
       log.debug(
-        s"Can't use serialized shuffle for shuffle $shufId because an aggregator is defined")
+        s"Can't use serialized shuffle for shuffle $shufId because map-side combine is required")
       false
     } else if (numPartitions > MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE) {
       log.debug(s"Can't use serialized shuffle for shuffle $shufId because it has more than " +

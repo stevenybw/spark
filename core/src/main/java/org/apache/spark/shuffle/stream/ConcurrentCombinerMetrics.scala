@@ -6,6 +6,7 @@ package org.apache.spark.shuffle.stream
 
 /** Metrics for a single task */
 class ConcurrentCombinerMetrics {
+  var innerInsertDuration = 0L
   var recordsWritten = 0L
   var writeDuration = 0L
   var serializationDuration = 0L

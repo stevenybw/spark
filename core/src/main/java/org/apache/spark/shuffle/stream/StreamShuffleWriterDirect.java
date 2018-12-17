@@ -129,14 +129,18 @@ public class StreamShuffleWriterDirect<K, V, C> extends ShuffleWriter<K, V> {
       }
     }
     taskDuration += System.nanoTime();
-    logger.info("YPerformanceMetric  map," + mapId +
-            "," + shuffleId +
-            "," + recordsWritten +
-            "," + bytesWritten +
-            "," + taskDuration +
-            "," + writeDuration +
-            "," + serializationDuration +
-            "," + mapSideCombine);
+    logger.info(ConcurrentCombiner.performanceLog("direct", "map",
+            mapId,
+            shuffleId,
+            recordsWritten,
+            recordsWritten,
+            bytesWritten,
+            taskDuration,
+            0,
+            0,
+            writeDuration,
+            serializationDuration,
+            mapSideCombine));
     ShuffleWriteMetrics shuffleWriteMetrics = taskContext.taskMetrics().shuffleWriteMetrics();
     shuffleWriteMetrics.incBytesWritten(bytesWritten);
     shuffleWriteMetrics.incRecordsWritten(recordsWritten);

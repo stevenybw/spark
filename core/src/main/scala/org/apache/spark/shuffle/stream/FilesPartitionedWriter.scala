@@ -6,6 +6,7 @@ package org.apache.spark.shuffle.stream
 
 import java.io.{BufferedOutputStream, FileOutputStream}
 import java.nio.channels.FileChannel
+import java.util.concurrent.ConcurrentHashMap
 
 import org.apache.spark.internal.Logging
 
@@ -28,7 +29,8 @@ private[spark] class FilesPartitionedWriter (
   // In-memory merging state should not be passed to others
   private var fileChannels = new Array[FileChannel](numPartitions)
   private var outputStreams = new Array[BufferedOutputStream](numPartitions)
-  private var closedShards = new mutable.HashSet[Int]()
+  private var closedShards = new ConcurrentHashMap[Int, Unit]()
+  // private var closedShards = new mutable.HashSet[Int]() // BUG: Concurrent modification
   private var closed = false
 
   logInfo(s"Shuffle ${shuffleId} outputs to reducer input files as ${shuffleBlockResolver.getMergedDataFile(shuffleId, 0, numMaps).getAbsolutePath}, consumes ${1e-6 * numPartitions * fileBufferBytes} MB memory for file buffer")
@@ -68,9 +70,11 @@ private[spark] class FilesPartitionedWriter (
 
   /**
     * Close the consumer and release the resources
+    *
+    * Implementor: thread-safety must be preserved since there would be multiple concurrent close request
     */
   def close(shardId: Int): Unit = {
-    if (!closedShards.contains(shardId)) {
+    if (!closedShards.containsKey(shardId)) {
       for (i <- 0 until outputStreams.length) {
         if (FilesPartitionedWriter.partitionBelongsToShard(i, numShards, shardId)) {
           outputStreams(i).flush()
@@ -78,7 +82,7 @@ private[spark] class FilesPartitionedWriter (
           outputStreams(i) = null
         }
       }
-      closedShards.add(shardId)
+      closedShards.put(shardId, Unit)
       if (closedShards.size == numShards) {
         fileChannels = null
         outputStreams = null
@@ -89,9 +93,11 @@ private[spark] class FilesPartitionedWriter (
 
   /**
     * Flush the buffered content into downstream
+    *
+    * Implementor: thread-safety must be preserved since there would be multiple concurrent close request
     */
   def flush(metrics: ConcurrentCombinerMetrics, shardId: Int): Unit = {
-    if(!closedShards.contains(shardId)) {
+    if(!closedShards.containsKey(shardId)) {
       metrics.writeDuration -= System.nanoTime()
       for (i <- 0 until outputStreams.length) {
         if (FilesPartitionedWriter.partitionBelongsToShard(i, numShards, shardId)) {

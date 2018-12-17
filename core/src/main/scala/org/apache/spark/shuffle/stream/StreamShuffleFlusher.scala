@@ -27,15 +27,18 @@ class StreamShuffleFlusher(blockManager: BlockManager,
     val partitionLengths = sharedWriter.getPartitionLengths(flusherId)
     sharedWriter.close(flusherId)
     taskDuration += System.nanoTime()
-    logInfo("YPerformanceMetric  flush," + taskId +
-      "," + handle.dependency.shuffleId +
-      "," + concurrentCombinerMetrics.recordsWritten +
-      "," + concurrentCombinerMetrics.bytesWritten +
-      "," + taskDuration +
-      "," + concurrentCombinerMetrics.writeDuration +
-      "," + concurrentCombinerMetrics.serializationDuration +
-      "," + 0 +
-      "," + handle.dependency.mapSideCombine)
+    logInfo(ConcurrentCombiner.performanceLog("direct", "flush",
+      taskId,
+      handle.dependency.shuffleId,
+      0,
+      concurrentCombinerMetrics.recordsWritten,
+      concurrentCombinerMetrics.bytesWritten,
+      taskDuration,
+      0,
+      concurrentCombinerMetrics.innerInsertDuration,
+      concurrentCombinerMetrics.writeDuration,
+      concurrentCombinerMetrics.serializationDuration,
+      handle.dependency.mapSideCombine))
     val shuffleWriteMetrics = taskContext.taskMetrics().shuffleWriteMetrics
     shuffleWriteMetrics.incBytesWritten(concurrentCombinerMetrics.bytesWritten)
     shuffleWriteMetrics.incRecordsWritten(concurrentCombinerMetrics.recordsWritten)

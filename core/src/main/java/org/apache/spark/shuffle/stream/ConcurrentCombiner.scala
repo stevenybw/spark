@@ -4,6 +4,8 @@
 
 package org.apache.spark.shuffle.stream
 
+import java.util.concurrent.ConcurrentHashMap
+
 import org.apache.spark.{Aggregator, Partitioner, ShuffleDependency}
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.Serializer
@@ -37,7 +39,12 @@ class ConcurrentCombiner[K, V, C](shuffleId: Int,
 extends Logging {
   private var closed = false
   private val numShards = 1<<numShardsPowerOfTwo
-  private val closedShards = new mutable.HashSet[Int]()
+
+  // private val closedShards = new mutable.HashSet[Int]() // BUG: Should be concurrent
+  private val _closedShards = new ConcurrentHashMap[Int, Unit]()
+  def isShardClosed(shardId: Int): Boolean = _closedShards.contains(shardId)
+  def setShardClosed(shardId: Int): Unit = _closedShards.put(shardId, Unit)
+  def numClosedShards(): Int = _closedShards.size()
 
   private def partitionIdFromLocalId(localId: Int, shardId: Int): Int = (localId<<numShardsPowerOfTwo) + shardId
 
@@ -72,7 +79,7 @@ extends Logging {
     * underlying file system.
     */
   def flush(metrics: ConcurrentCombinerMetrics, shardId: Int): Unit = {
-    if (!closedShards.contains(shardId)) {
+    if (!isShardClosed(shardId)) {
       shards(shardId).flush(metrics)
       filesPartitionedWriter.flush(metrics, shardId)
     }
@@ -82,16 +89,51 @@ extends Logging {
     * Flush and close
     */
   def close(metrics: ConcurrentCombinerMetrics, shardId: Int): Unit = {
-    if (!closedShards.contains(shardId)) {
+    if (!isShardClosed(shardId)) {
       shards(shardId).close(metrics)
       shards(shardId) = null
       filesPartitionedWriter.close(shardId)
-      closedShards.add(shardId)
-      if (closedShards.size == numShards) {
+      setShardClosed(shardId)
+      if (numClosedShards() == numShards) {
         shards = null
         filesPartitionedWriter = null
         closed = true
       }
     }
+  }
+}
+
+object ConcurrentCombiner {
+  /**
+    *
+    * @param logInfo
+    * @param phase
+    * @param taskId
+    * @param shuffleId
+    * @param recordsProcessed
+    * @param recordsWritten
+    * @param bytesWritten
+    * @param taskTimeNs The time of the whole task
+    * @param outerInsertNs The time of insertion (before the lock is acquired)
+    * @param innerInsertNs The time of insertion (after the lock is acquired)
+    * @param writeTimeNs The time blocked on I/O write
+    * @param serializationTimeNs The time for serialization
+    * @param mapSideCombine Whether to use mapSideCombine
+    */
+  def performanceLog(shuffler: String,
+                     phase: String,
+                     taskId: Int,
+                     shuffleId: Int,
+                     recordsProcessed: Long,
+                     recordsWritten: Long,
+                     bytesWritten: Long,
+                     taskTimeNs: Long,
+                     outerInsertNs: Long,
+                     innerInsertNs: Long,
+                     writeTimeNs: Long,
+                     serializationTimeNs: Long,
+                     mapSideCombine: Boolean): String = {
+    s"YPerformanceMetric  ${shuffler},${phase},${taskId},${shuffleId},${recordsProcessed},${recordsWritten}," +
+      s"${bytesWritten},${taskTimeNs},${outerInsertNs},${innerInsertNs},${writeTimeNs},${serializationTimeNs},${mapSideCombine}"
   }
 }

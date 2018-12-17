@@ -25,23 +25,29 @@ extends ShuffleWriter[K, V] with Logging {
   override def write(records: Iterator[Product2[K, V]]): Unit = {
     require(handle.mapSideCombine, "Map-side combine must be enabled to use combined stream shuffle")
     var taskDuration = -System.nanoTime()
+    var outerInsertDuration = 0L
     val concurrentCombinerMetrics = new ConcurrentCombinerMetrics
     var numRecords = 0L
     while (records.hasNext) {
       val record = records.next()
+      outerInsertDuration -= System.nanoTime()
       concurrentCombiner.insert(record, concurrentCombinerMetrics, handle.dependency.aggregator.get)
+      outerInsertDuration += System.nanoTime()
       numRecords += 1
     }
     taskDuration += System.nanoTime()
-    logInfo("YPerformanceMetric  map," + mapId +
-      "," + handle.dependency.shuffleId +
-      "," + concurrentCombinerMetrics.recordsWritten +
-      "," + concurrentCombinerMetrics.bytesWritten +
-      "," + taskDuration +
-      "," + concurrentCombinerMetrics.writeDuration +
-      "," + concurrentCombinerMetrics.serializationDuration +
-      "," + numRecords +
-      "," + handle.dependency.mapSideCombine)
+    logInfo(ConcurrentCombiner.performanceLog("combined", "map",
+      mapId,
+      handle.dependency.shuffleId,
+      numRecords,
+      concurrentCombinerMetrics.recordsWritten,
+      concurrentCombinerMetrics.bytesWritten,
+      taskDuration,
+      outerInsertDuration,
+      concurrentCombinerMetrics.innerInsertDuration,
+      concurrentCombinerMetrics.writeDuration,
+      concurrentCombinerMetrics.serializationDuration,
+      handle.dependency.mapSideCombine))
     val shuffleWriteMetrics = taskContext.taskMetrics().shuffleWriteMetrics
     shuffleWriteMetrics.incBytesWritten(concurrentCombinerMetrics.bytesWritten)
     shuffleWriteMetrics.incRecordsWritten(concurrentCombinerMetrics.recordsWritten)

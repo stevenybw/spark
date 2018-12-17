@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.serializer.Serializer
+import org.apache.spark.serializer.{SerializationStream, Serializer}
 import org.apache.spark.{Aggregator, Partitioner, ShuffleDependency}
 import org.apache.spark.util.collection.PartitionedAppendOnlyMap
 
@@ -43,9 +43,6 @@ extends Logging {
   // private val update = (hadValue: Boolean, oldValue: C) => {
   //   if (hadValue) mergeValue(oldValue, kv._2) else createCombiner(kv._2)
   // }
-  private val serializerInstance = serializer.newInstance()
-  private val serBuffer = new BufExposedByteArrayOutputStream(4096)
-  private val serStream = serializerInstance.serializeStream(serBuffer)
 
   @volatile private var map = new PartitionedAppendOnlyMap[K, C]
 
@@ -53,7 +50,12 @@ extends Logging {
     def getBuf(): Array[Byte] = buf
   }
 
-  private def writeElement(partitionId: Int, key: K, combinedValue: C, metrics: ConcurrentCombinerMetrics): Unit = {
+  private def writeElement(partitionId: Int,
+                           key: K,
+                           combinedValue: C,
+                           metrics: ConcurrentCombinerMetrics,
+                           serBuffer: BufExposedByteArrayOutputStream,
+                           serStream: SerializationStream): Unit = {
     metrics.serializationDuration -= System.nanoTime()
     serBuffer.reset()
     serStream.writeKey(key.asInstanceOf[AnyRef])
@@ -72,13 +74,16 @@ extends Logging {
   /** Spill the in-memory original map into PartitionedWriter */
   private def spill(originalMap: PartitionedAppendOnlyMap[K, C], metrics: ConcurrentCombinerMetrics): Unit = {
     logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId} start spilling")
+    val serializerInstance = serializer.newInstance()
+    val serBuffer = new BufExposedByteArrayOutputStream(4096)
+    val serStream = serializerInstance.serializeStream(serBuffer)
     val inMemoryIterator = originalMap.iterator
     while (inMemoryIterator.hasNext) {
       val record = inMemoryIterator.next()
       val partitionId = record._1._1
       val key = record._1._2
       val combinedValue = record._2
-      writeElement(partitionId, key, combinedValue, metrics)
+      writeElement(partitionId, key, combinedValue, metrics, serBuffer, serStream)
     }
     logInfo(s"stage of shuffle id ${shuffleId}  shard id ${shardId} successfully spilled")
   }
@@ -88,13 +93,14 @@ extends Logging {
     * @param record
     */
   def insert(partitionId: Int, record: Product2[K, V], metrics: ConcurrentCombinerMetrics, aggregator: Aggregator[K, V, C]): Unit = {
-    lock.lock()
-    metrics.innerInsertDuration -= System.nanoTime()
     val createCombiner = aggregator.createCombiner
     val mergeValue = aggregator.mergeValue
-    map.changeValue((partitionId, record._1), (hadValue, oldValue) => {
+    val updateFunc = (hadValue: Boolean, oldValue: C) => {
       if (hadValue) mergeValue(oldValue, record._2) else createCombiner(record._2)
-    })
+    }
+    lock.lock()
+    metrics.innerInsertDuration -= System.nanoTime()
+    map.changeValue((partitionId, record._1), updateFunc)
     val estimateSize = map.estimateSize()
     if (estimateSize > capacityBytes) {
       val originalMap = map

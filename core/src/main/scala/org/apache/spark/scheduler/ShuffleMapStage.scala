@@ -81,12 +81,9 @@ private[spark] class ShuffleMapStage(
 
   def numFlushTasks: Int = allFlushTasks.size
 
-  /** Convert executorId: String to continguous integer (For now just convert to integer directly */
-  def convertExecutorId(executorId: String): Int = executorId.toInt
-
   /** Get task index from executorId and flusherId pair */
   def taskIndexFromExecutorIdAndFlusherId(executorId: String, flusherId: Int): Int = {
-    convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
+    org.apache.spark.executor.Executor.convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
   }
 
   /** Add a new executor for flush tasks */

@@ -822,4 +822,10 @@ private[spark] object Executor {
   // task is fully deserialized. When possible, the TaskContext.getLocalProperty call should be
   // used instead.
   val taskDeserializationProps: ThreadLocal[Properties] = new ThreadLocal[Properties]
+
+  /**
+    * Convert String-represented executorId to continuous integer range starting with 0. Ensure that start from
+    * 0, otherwise there would be correctness issue.
+    */
+  def convertExecutorId(executorId: String): Int = executorId.toInt - 1
 }

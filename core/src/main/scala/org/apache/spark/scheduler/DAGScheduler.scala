@@ -1361,6 +1361,7 @@ class DAGScheduler(
             require(stageIdToStage(task.stageId).latestInfo.attemptNumber() == task.stageAttemptId, "stage attempt id mismatch")
             shuffleStage.completeShuffleMapTask(sft.taskId)
             require(!(failedEpoch.contains(execId) && sft.epoch <= failedEpoch(execId)), "failed scenario to do in the future")
+            logInfo(s"Register map output for shuffle flusher ${sft.partitionId}")
             mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId, sft.partitionId, status)
             // shuffleStage.pendingFlushTask -= task.partitionId
             require(runningStages.contains(shuffleStage), "a shuffle flush task to not running stage detected")

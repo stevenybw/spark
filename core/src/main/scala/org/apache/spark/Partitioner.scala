@@ -18,13 +18,13 @@
 package org.apache.spark
 
 import java.io.{IOException, ObjectInputStream, ObjectOutputStream}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.math.log10
 import scala.reflect.ClassTag
 import scala.util.hashing.byteswap32
-
 import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.util.{CollectionsUtils, Utils}
@@ -96,6 +96,36 @@ object Partitioner {
     val maxPartitions = rdds.map(_.partitions.length).max
     log10(maxPartitions) - log10(hasMaxPartitioner.getNumPartitions) < 1
   }
+}
+
+/**
+  * A [[Partitioner]] that randomly partition the elements, so that we may assign element from the same
+  * key to different partitions. This is useful for treeAggregateOptimized to evenly distribute the combiners
+  * across intermediate aggregators.
+  *
+  * Actually, this is really an ad-hoc way to implement the optimized treeAggregate. It has nothing about
+  * partitioning.
+  */
+class RandomPartitioner(partitions: Int) extends Partitioner {
+  val counter = new AtomicLong(0)
+  val numPartitionsAsLong = partitions.toLong
+
+  override def numPartitions: Int = partitions
+
+  override def getPartition(key: Any): Int = {
+    val startCounter = org.apache.spark.executor.Executor.convertExecutorId(SparkEnv.get.executorId)
+    counter.compareAndSet(0, startCounter)
+    (counter.incrementAndGet() % numPartitionsAsLong).toInt
+  }
+
+  override def equals(other: Any): Boolean = other match {
+    case r: RandomPartitioner =>
+      r.numPartitions == numPartitions
+    case _ =>
+      false
+  }
+
+  override def hashCode(): Int = numPartitions
 }
 
 /**

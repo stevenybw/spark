@@ -1119,13 +1119,52 @@ abstract class RDD[T: ClassTag](
     jobResult
   }
 
+  def treeAggregate[U: ClassTag](zeroValue: U)(
+      seqOp: (U, T) => U,
+      combOp: (U, U) => U,
+      depth: Int = 2): U = {
+    val enableOptimization = conf.getBoolean("spark.aggregate.useOptimized", defaultValue = false)
+    if (enableOptimization) {
+      treeAggregateOptimized(zeroValue)(seqOp, combOp, depth)
+    } else {
+      treeAggregateVanilla(zeroValue)(seqOp, combOp, depth)
+    }
+  }
+
+  def treeAggregateOptimized[U: ClassTag](zeroValue: U)(
+                                         seqOp: (U, T) => U,
+                                         combOp: (U, U) => U,
+                                         depth: Int = 2): U = withScope {
+    require(depth >= 1, s"Depth must be greater than or equal to 1 but got ${depth}")
+    if (partitions.length == 0) {
+      Utils.clone(zeroValue, context.env.closureSerializer.newInstance())
+    } else {
+      val cleanSeqOp = context.clean(seqOp)
+      val cleanCombOp = context.clean(combOp)
+      val aggregatePartition =
+        (it: Iterator[T]) => it.aggregate(zeroValue)(cleanSeqOp, cleanCombOp)
+      var partiallyAggregated: RDD[U] = mapPartitions(it => Iterator(aggregatePartition(it)))
+      var numPartitions = partiallyAggregated.partitions.length
+      val scale = math.max(math.ceil(math.pow(numPartitions, 1.0 / depth)).toInt, 2)
+      while (numPartitions > scale + math.ceil(numPartitions.toDouble / scale)) {
+        numPartitions /= scale
+        val curNumPartitions = numPartitions
+        partiallyAggregated = partiallyAggregated.mapPartitionsWithIndex {
+          (i, iter) => iter.map((0, _))
+        }.foldByKey(zeroValue, new RandomPartitioner(curNumPartitions))(cleanCombOp).values
+      }
+      val copiedZeroValue = Utils.clone(zeroValue, sc.env.closureSerializer.newInstance())
+      partiallyAggregated.fold(copiedZeroValue)(cleanCombOp)
+    }
+  }
+
   /**
    * Aggregates the elements of this RDD in a multi-level tree pattern.
    * This method is semantically identical to [[org.apache.spark.rdd.RDD#aggregate]].
    *
    * @param depth suggested depth of the tree (default: 2)
    */
-  def treeAggregate[U: ClassTag](zeroValue: U)(
+  def treeAggregateVanilla[U: ClassTag](zeroValue: U)(
       seqOp: (U, T) => U,
       combOp: (U, U) => U,
       depth: Int = 2): U = withScope {

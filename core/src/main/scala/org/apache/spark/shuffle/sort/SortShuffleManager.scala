@@ -18,10 +18,14 @@
 package org.apache.spark.shuffle.sort
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 import org.apache.spark._
 import org.apache.spark.internal.Logging
+import org.apache.spark.memory.TaskMemoryManager
 import org.apache.spark.shuffle._
+import org.apache.spark.shuffle.gpft.PerThreadCollectionPool
+import org.apache.spark.shuffle.sort.collection.SharedExternalSorter
 
 /**
  * In sort-based shuffle, incoming records are sorted according to their target partition ids, then
@@ -74,6 +78,14 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
         " Shuffle will continue to spill to disk when necessary.")
   }
 
+  val combineMode = conf.get("spark.shuffle.sort.combineMode", "task")
+
+  /**
+    * baseTaskId should be as large as possible to avoid conflict of normal tasks with execution tasks.
+    * This is just a ad-hoc way to pretend a task to pass into TaskMemoryManager
+    * */
+  val baseTaskId = 1L<<32
+
   /**
    * A mapping from shuffle ids to the number of mappers producing output for those shuffles.
    */
@@ -102,7 +114,11 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
         shuffleId, numMaps, dependency.asInstanceOf[ShuffleDependency[K, V, V]])
     } else {
       // Otherwise, buffer map outputs in a deserialized form:
-      new BaseShuffleHandle(shuffleId, numMaps, dependency)
+      combineMode match {
+        case "task" => new BaseShuffleHandle(shuffleId, numMaps, dependency)
+        case "thread" => new SortShuffleCombinedHandle(shuffleId, numMaps, dependency)
+        case _ => new BaseShuffleHandle(shuffleId, numMaps, dependency)
+      }
     }
   }
 
@@ -147,6 +163,25 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
           mapId,
           context,
           env.conf)
+      case sortShuffleCombinedHandle: SortShuffleCombinedHandle[K @unchecked, V @unchecked, _] =>
+        logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} uses SortShuffleCombinedWriter as shuffle writer")
+        val shuffleId = sortShuffleCombinedHandle.shuffleId
+        val dep = sortShuffleCombinedHandle.dependency
+        val sharedObjectManager = env.sharedObjectManager
+        val memoryManager = env.memoryManager
+        val sharedCounter = sharedObjectManager.getOrCreate(SortShuffleManager.getObjIdCounter(), (x: String) => {
+          new AtomicLong(0)
+        })
+        val objId = SortShuffleManager.getObjIdPool(shuffleId)
+        val perThreadCollectionPool = sharedObjectManager.getOrCreate(objId, (x: String) => {
+          val createSorter = (id: Long) => {
+            val taskMemoryManager = new TaskMemoryManager(memoryManager, baseTaskId+id)
+            val sorter = new SharedExternalSorter(shuffleId, dep, taskMemoryManager, Some(dep.partitioner), dep.keyOrdering, dep.serializer)
+            sorter
+          }
+          new PerThreadCollectionPool(sharedCounter, createSorter)
+        })
+        new SortShuffleCombinedWriter(shuffleBlockResolver, sortShuffleCombinedHandle, mapId, context, perThreadCollectionPool)
       case other: BaseShuffleHandle[K @unchecked, V @unchecked, _] =>
         logInfo(s"map task id ${mapId} of shuffle ${handle.shuffleId} uses SortShuffleWriter as shuffle writer")
         new SortShuffleWriter(shuffleBlockResolver, other, mapId, context)
@@ -169,13 +204,54 @@ private[spark] class SortShuffleManager(conf: SparkConf) extends ShuffleManager 
   }
 
   /** Get a flusher */
-  override def getFlusher(handle: ShuffleHandle, taskId: Int, context: TaskContext): Option[ShuffleFlusher] = None
+  override def getFlusher(handle: ShuffleHandle, taskId: Int, context: TaskContext): Option[ShuffleFlusher] = {
+    val env = SparkEnv.get
+    handle match {
+      case sortShuffleCombinedHandle: SortShuffleCombinedHandle[_, _, _] =>
+        logInfo(s"flush task id ${taskId} of shuffle ${handle.shuffleId} called getFlusher")
+        val shuffleId = sortShuffleCombinedHandle.shuffleId
+        val dep = sortShuffleCombinedHandle.dependency
+        val sharedObjectManager = env.sharedObjectManager
+        val memoryManager = env.memoryManager
+        val sharedCounter = sharedObjectManager.getOrCreate(SortShuffleManager.getObjIdCounter(), (x: String) => {
+          new AtomicLong(0)
+        })
+        val objId = SortShuffleManager.getObjIdPool(shuffleId)
+        val perThreadCollectionPool = sharedObjectManager.getOrCreate(objId, (x: String) => {
+          val createSorter = (id: Long) => {
+            val taskMemoryManager = new TaskMemoryManager(memoryManager, baseTaskId+id)
+            val sorter = new SharedExternalSorter(shuffleId, dep, taskMemoryManager, Some(dep.partitioner), dep.keyOrdering, dep.serializer)
+            sorter
+          }
+          new PerThreadCollectionPool(sharedCounter, createSorter)
+        })
+        Some(new SortShuffleCombinedFlusher(shuffleBlockResolver, sortShuffleCombinedHandle, taskId, context, perThreadCollectionPool))
+      case _ =>
+        None
+    }
+  }
 
-  override def flushRequired(handle: ShuffleHandle): Boolean = false
+  override def flushRequired(handle: ShuffleHandle): Boolean = {
+    handle match {
+      case _: SerializedShuffleHandle[_, _] => false
+      case _: BypassMergeSortShuffleHandle[_, _] => false
+      case _: SortShuffleCombinedHandle[_, _, _] => true
+      case _: BaseShuffleHandle[_, _, _] => false
+    }
+  }
 }
 
 
 private[spark] object SortShuffleManager extends Logging {
+  val SORT_SHUFFLE_PREFIX = "sort_shuffle_"
+
+  def getObjIdPool(shuffleId: Int): String = {
+    SORT_SHUFFLE_PREFIX + "pool_" + shuffleId.toString
+  }
+
+  def getObjIdCounter(): String = {
+    SORT_SHUFFLE_PREFIX + "counter"
+  }
 
   /**
    * The maximum number of shuffle output partitions that SortShuffleManager supports when
@@ -232,3 +308,11 @@ private[spark] class BypassMergeSortShuffleHandle[K, V](
   dependency: ShuffleDependency[K, V, V])
   extends BaseShuffleHandle(shuffleId, numMaps, dependency) {
 }
+
+private[spark] class SortShuffleCombinedHandle[K, V, C](
+                                                 shuffleId: Int,
+                                                 numMaps: Int,
+                                                 dependency: ShuffleDependency[K, V, C])
+  extends BaseShuffleHandle(shuffleId, numMaps, dependency) {
+}
+

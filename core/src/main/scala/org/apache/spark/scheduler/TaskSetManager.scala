@@ -801,12 +801,9 @@ private[spark] class TaskSetManager(
     pendingFlushTasks.put((host, executorId), taskQueue)
   }
 
-  /** Convert executorId: String to continguous integer (For now just convert to integer directly */
-  def convertExecutorId(executorId: String): Int = executorId.toInt
-
   /** Get task index from executorId and flusherId pair */
   def taskIndexFromExecutorIdAndFlusherId(executorId: String, flusherId: Int): Int = {
-    convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
+    org.apache.spark.executor.Executor.convertExecutorId(executorId) * numFlushTasksPerExecutor + flusherId
   }
 
   /** Try to fetch a shuffle flush task given specified executorId and hostId */
